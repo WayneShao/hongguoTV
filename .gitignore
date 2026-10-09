@@ -31,6 +31,7 @@ keystore.properties
 
 # Delivery artifacts, native intermediates, local runtime
 /outputs/
+/kotlin-tv/outputs/
 /server/.local/
 .cxx/
 .externalNativeBuild/

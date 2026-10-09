@@ -2,6 +2,7 @@
 package com.hongguotv.nativeapp
 
 import android.app.Activity
+import com.hongguotv.nativeapp.rayneo.RayNeoDialogs
 import android.app.AlertDialog
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -39,13 +40,13 @@ class TvTools(private val activity: Activity) {
     }
     fun close() { dialog?.dismiss(); phone?.close(); phone=null }
     fun destroy() { close(); worker.shutdownNow() }
-    fun info(title: String,message: String,anchor: View?) = open(AlertDialog.Builder(activity).setTitle(title).setMessage(message).setPositiveButton("知道了",null).create(),anchor)
+    fun info(title: String,message: String,anchor: View?) = open(RayNeoDialogs.builder(activity).setTitle(title).setMessage(message).setPositiveButton("知道了",null).create(),anchor)
     fun confirm(title: String,message: String,anchor: View?,action: ()->Unit) {
-        val next=AlertDialog.Builder(activity).setTitle(title).setMessage(message).setNegativeButton("取消",null).setPositiveButton("确认") { _,_-> action() }.create()
+        val next=RayNeoDialogs.builder(activity).setTitle(title).setMessage(message).setNegativeButton("取消",null).setPositiveButton("确认") { _,_-> action() }.create()
         open(next,anchor); next.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus()
     }
     fun choose(title: String,labels: List<String>,anchor: View?,onChoice: (Int)->Unit,extra: String?=null,onExtra: ()->Unit={}) {
-        val builder=AlertDialog.Builder(activity).setTitle(title).setItems(labels.toTypedArray()) { _,index-> onChoice(index) }.setNegativeButton("取消",null)
+        val builder=RayNeoDialogs.builder(activity).setTitle(title).setItems(labels.toTypedArray()) { _,index-> onChoice(index) }.setNegativeButton("取消",null)
         if(extra!=null) builder.setNeutralButton(extra) { _,_-> onExtra() }
         val next=builder.create(); open(next,anchor); next.listView.requestFocus()
     }
@@ -69,7 +70,7 @@ class TvTools(private val activity: Activity) {
             }
             content.addView(row)
         }
-        val next=AlertDialog.Builder(activity).setTitle("跳转集数 · 1—$count").setView(ScrollView(activity).apply { addView(content) }).setNegativeButton("取消",null).setPositiveButton("定位",null).create()
+        val next=RayNeoDialogs.builder(activity).setTitle("跳转集数 · 1—$count").setView(ScrollView(activity).apply { addView(content) }).setNegativeButton("取消",null).setPositiveButton("定位",null).create()
         next.setOnKeyListener { _,key,event ->
             when {
                 key in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 -> { if(event.action==KeyEvent.ACTION_DOWN) digit((key-KeyEvent.KEYCODE_0).toString()); true }
@@ -109,7 +110,7 @@ class TvTools(private val activity: Activity) {
             info("手机输入","请让电视和手机连接同一局域网（Wi-Fi 或有线网络）后重试。",anchor); return
         }
         val content=column(); val status=label("正在生成二维码…"); content.addView(status)
-        val next=AlertDialog.Builder(activity).setTitle("手机输入剧名").setView(content).setNegativeButton("关闭",null).create()
+        val next=RayNeoDialogs.builder(activity).setTitle("手机输入剧名").setView(content).setNegativeButton("关闭",null).create()
         open(next,anchor)
         worker.execute {
             try {
@@ -135,7 +136,7 @@ class TvTools(private val activity: Activity) {
             info("备份与恢复","请让电视和手机连接同一局域网后重试。",anchor); return
         }
         val content=column(); val status=label("正在生成二维码…"); content.addView(status)
-        val next=AlertDialog.Builder(activity).setTitle("手机备份与恢复").setView(ScrollView(activity).apply { addView(content) }).setNegativeButton("关闭",null).create()
+        val next=RayNeoDialogs.builder(activity).setTitle("手机备份与恢复").setView(ScrollView(activity).apply { addView(content) }).setNegativeButton("关闭",null).create()
         open(next,anchor)
         worker.execute {
             try {
@@ -145,7 +146,7 @@ class TvTools(private val activity: Activity) {
                     val preview=column()
                     preview.addView(label("备份含 ${data.favorites.size} 部收藏、${data.history.size} 条观看记录、${data.searches.size} 条搜索、${data.later.size} 部稍后看、${data.hidden.size} 部已隐藏推荐。\n\n收藏合并，观看位置以较新的记录为准；已有收藏优先保留（最多 500 部），历史保留最近 200 条。",16f))
                     val settings=CheckBox(activity).apply { text="同时恢复播放设置和内容分类"; isChecked=false }; preview.addView(settings)
-                    val confirm=AlertDialog.Builder(activity).setTitle("确认恢复本机记录")
+                    val confirm=RayNeoDialogs.builder(activity).setTitle("确认恢复本机记录")
                         .setView(ScrollView(activity).apply { addView(preview) }).setNegativeButton("取消",null)
                         .setPositiveButton("合并恢复") { _,_-> restore(data,settings.isChecked) }.create()
                     open(confirm,anchor); confirm.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus()

@@ -47,7 +47,7 @@ class WatchingTest {
     }
     @Test fun `legacy global defaults stay valid and invalid values have safe defaults`() {
         assertEquals(720,PlaybackQuality.normalize(720)); assertEquals(1080,PlaybackQuality.normalize(1080))
-        assertEquals(1080,PlaybackQuality.normalize(-1)); assertEquals(480,PlaybackQuality.normalize(480))
+        assertEquals(480,PlaybackQuality.normalize(-1)); assertEquals(480,PlaybackQuality.normalize(480))
         assertEquals(1.5f,PlaybackSpeed.normalize(1.5f)); assertEquals(1f,PlaybackSpeed.normalize(Float.NaN))
     }
 }

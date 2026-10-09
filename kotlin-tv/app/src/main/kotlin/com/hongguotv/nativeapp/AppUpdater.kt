@@ -2,6 +2,7 @@
 package com.hongguotv.nativeapp
 
 import android.app.Activity
+import com.hongguotv.nativeapp.rayneo.RayNeoDialogs
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.Intent
@@ -64,6 +65,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         }
     }
     fun resume() {
+        if (BuildConfig.APPLICATION_ID == "com.hongguotv.rayneo") { active=true; return }
         active = true; main.removeCallbacks(poll); main.postDelayed(poll, 8000)
         if (permissionRequested) {
             permissionRequested = false
@@ -94,6 +96,20 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     }
     fun show(from: View?) {
         if (!active) return
+        if (BuildConfig.APPLICATION_ID == "com.hongguotv.rayneo") {
+            dialog?.dismiss()
+            anchor = from
+            val next = RayNeoDialogs.builder(activity).setTitle("版本与更新 · ${BuildConfig.VERSION_NAME}")
+                .setMessage("当前版本单独维护，后续使用相同签名的安装包更新。收藏和观看记录保存在本机。")
+                .setPositiveButton("关闭",null).create()
+            dialog = next
+            next.setOnDismissListener {
+                if (dialog === next) dialog = null
+                if (from?.isAttachedToWindow == true) from.requestFocus()
+            }
+            next.show()
+            return
+        }
         anchor = from
         dialog?.dismiss()
         val dp = activity.resources.displayMetrics.density
@@ -111,7 +127,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
             text = "只在应用前台浏览时检查，播放中不打扰。下载后需确认系统安装，收藏与观看记录保留。"; textSize = 13f; setTextColor(TvStyle.muted)
             setPadding(0, (8*dp).toInt(), 0, (8*dp).toInt())
         })
-        val next = AlertDialog.Builder(activity).setTitle("版本与更新 · ${BuildConfig.VERSION_NAME}").setView(ScrollView(activity).apply { addView(body) })
+        val next = RayNeoDialogs.builder(activity).setTitle("版本与更新 · ${BuildConfig.VERSION_NAME}").setView(ScrollView(activity).apply { addView(body) })
             .setNegativeButton("稍后", null).setPositiveButton("检查更新", null).create()
         dialog = next
         next.setOnDismissListener {

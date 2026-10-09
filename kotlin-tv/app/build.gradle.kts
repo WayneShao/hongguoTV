@@ -8,11 +8,12 @@ android {
     namespace = "com.hongguotv.nativeapp"
     compileSdk = 36
     defaultConfig {
-        applicationId = "com.hongguotv.nativeapp"
+        applicationId = "com.hongguotv.rayneo"
         minSdk = 26
+        testInstrumentationRunner = "com.hongguotv.nativeapp.rayneo.InputRegressionInstrumentation"
         targetSdk = 36
-        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 9
-        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0"
+        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 10
+        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0-rayneo.2"
     }
     buildFeatures { buildConfig = true }
     signingConfigs {
@@ -29,6 +30,7 @@ android {
     packaging { resources.excludes += setOf("META-INF/versions/**", "META-INF/*.kotlin_module") }
 }
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core:1.8.0")
     implementation("com.google.zxing:core:3.5.3")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")

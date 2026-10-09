@@ -9,6 +9,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.widget.*
 import com.hongguotv.core.Series
+import com.hongguotv.nativeapp.rayneo.RayNeoDisplay
 
 /** Fixed text slots keep D-pad movement from resizing the content below the preview. */
 class SeriesPreview(context: Context): LinearLayout(context) {
@@ -113,7 +114,7 @@ class HomeScreen(
             horizontal.addView(line); block.addView(horizontal)
             val rowCards=mutableListOf<Card>()
             fun addCard(entry: Entry?,moreAction: (() -> Unit)?=null) {
-                val width=((resources.displayMetrics.widthPixels*.9f-dp(70))/6).toInt().coerceAtLeast(dp(100))
+                val width=((RayNeoDisplay.eyeWidth(context)*.9f-dp(14)*(RayNeoDisplay.columns(context)-1))/RayNeoDisplay.columns(context)).toInt().coerceAtLeast(dp(100))
                 val key=if(entry!=null) "${shelf.key}:${entry.series.id}" else "${shelf.key}:more"
                 val view=LinearLayout(context).apply { orientation=VERTICAL; id=View.generateViewId(); tag=key; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(4),dp(4),dp(4),dp(8)); background=shape(false) }
                 val image=if(entry!=null) ImageView(context).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=IMPORTANT_FOR_ACCESSIBILITY_NO } else null

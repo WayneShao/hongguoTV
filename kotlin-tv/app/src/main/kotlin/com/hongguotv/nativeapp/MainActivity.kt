@@ -3,6 +3,7 @@ package com.hongguotv.nativeapp
 
 import android.app.Activity
 import android.app.AlertDialog
+import com.hongguotv.nativeapp.rayneo.*
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -82,6 +83,9 @@ class MainActivity: Activity() {
     private val sleepTimer=SleepTimer { android.os.SystemClock.elapsedRealtime() }
     private var sleepStopped=false
     private var playerView: PlayerView?=null
+    private var stereoVideo: StereoVideoView?=null
+    private lateinit var scene: FrameLayout
+    private lateinit var notices: RayNeoNotice
     private lateinit var favoriteMonitor: FavoriteMonitor
     private val favoriteBadges=mutableMapOf<String,TextView>()
     private var favoriteStatus: TextView?=null
@@ -173,7 +177,7 @@ class MainActivity: Activity() {
     private val hideHud=Runnable { if(screen=="player" && !panel && player?.isPlaying==true && !playError) hidePlaybackOverlay() }
     private val seekRunnable=Runnable { pendingSeek?.let { player?.seekTo(it) }; pendingSeek=null }
     private fun dp(value: Number)=(value.toFloat()*resources.displayMetrics.density).toInt()
-    private fun widthDp()=resources.displayMetrics.widthPixels/resources.displayMetrics.density
+    private fun widthDp()=RayNeoDisplay.eyeWidth(this)/resources.displayMetrics.density
     private fun lp(w: Int=LinearLayout.LayoutParams.MATCH_PARENT,h: Int=LinearLayout.LayoutParams.WRAP_CONTENT)=LinearLayout.LayoutParams(w,h)
     private fun rounded(color: Int,border: Int=Color.TRANSPARENT)=TvStyle.shape(this,color,border)
     private fun text(value: String,size: Float=16f,color: Int=white)=TextView(this).apply { text=value; textSize=size; setTextColor(color); includeFontPadding=false }
@@ -193,7 +197,12 @@ class MainActivity: Activity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
+        library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }
+        val logical=FrameLayout(this).apply { addView(root,FrameLayout.LayoutParams(-1,-1)) }
+        notices=RayNeoNotice(logical)
+        scene=FrameLayout(this).apply { setBackgroundColor(Color.BLACK); addView(RayNeoLayout(this@MainActivity,logical),FrameLayout.LayoutParams(-1,-1)) }
+        setContentView(scene)
+        RayNeoInput.install(window)
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
         connectivity=getSystemService(ConnectivityManager::class.java)
         runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
@@ -322,7 +331,7 @@ class MainActivity: Activity() {
         val top=row().apply { setPadding(0,0,0,dp(8)) }
         val brand=row()
         brand.addView(ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_icon) },lp(dp(28),dp(28)).apply { rightMargin=dp(9) })
-        brand.addView(text("红果",22f).apply { typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) })
+        brand.addView(text("红果TV",22f).apply { typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) })
         top.addView(brand,lp(dp(120),dp(44)))
         listOf("首页","搜索","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
             val item=addButton(top,label,index==tab) { switchTab(index) }
@@ -333,7 +342,7 @@ class MainActivity: Activity() {
             }
             paint(false); item.setOnFocusChangeListener { _,focused -> paint(focused) }; nav+=item
         }
-        container.addView(top)
+        container.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(top) },lp(-1,-2))
         container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
         if(tab==5) {
             val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
@@ -427,7 +436,7 @@ class MainActivity: Activity() {
                 catalog=emptyList(); hasMore=false; ranking=null; rankSubtitle?.text="榜单加载失败"
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
-                    Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
+                    notices.show("搜索结果已过期，已回到第 1 页刷新",1)
                     showCatalog(true)
                 } else {
                     body.removeAllViews()
@@ -467,7 +476,7 @@ class MainActivity: Activity() {
             if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
             return
         }
-        val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
+        val cards=mutableListOf<View>(); val count=RayNeoDisplay.columns(this); val gap=dp(14); val width=((RayNeoDisplay.eyeWidth(this)*.9f-gap*(count-1))/count).toInt()
         displayed.chunked(count).forEach { items ->
             val line=row(); line.gravity=Gravity.TOP
             items.forEachIndexed { columnIndex,item ->
@@ -623,10 +632,10 @@ class MainActivity: Activity() {
         tvTools.choose(series.title,labels,anchor,{ choice ->
             when(choice) {
                 0 -> openDetail(series,true)
-                1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==3 || collection=="updates")); if(added) favoriteMonitor.check() }
-                2 -> { val added=library.toggleLater(series); Toast.makeText(this,if(added) "已加入稍后看" else "已移出稍后看",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && collection=="later") }
+                1 -> { val added=library.toggle(series); notices.show(if(added) "已收藏" else "已取消收藏"); refreshLibraryCards(series.id,!added && (tab==3 || collection=="updates")); if(added) favoriteMonitor.check() }
+                2 -> { val added=library.toggleLater(series); notices.show(if(added) "已加入稍后看" else "已移出稍后看"); refreshLibraryCards(series.id,!added && collection=="later") }
                 3 -> openDetail(series)
-                4 -> if(tab==4) manageHistory(series,anchor) else { library.hide(series.id); Toast.makeText(this,"已隐藏热门推荐，可在设置中恢复",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,true) }
+                4 -> if(tab==4) manageHistory(series,anchor) else { library.hide(series.id); notices.show("已隐藏热门推荐，可在设置中恢复"); refreshLibraryCards(series.id,true) }
             }
         })
     }
@@ -690,18 +699,18 @@ class MainActivity: Activity() {
                     favoriteMonitor.stop(); library.restore(data,restoreSettings)
                     tabState.clear(); tabFocus.clear(); catalogFocus=""; page=1
                     showCatalog(); favoriteMonitor.check()
-                    Toast.makeText(this,"记录已合并恢复",Toast.LENGTH_LONG).show()
+                    notices.show("记录已合并恢复",1)
                 }
             }.onFailure { tvTools.info("无法生成备份","本机记录暂时无法导出，请重试。",backup) }
         }
         lateinit var hidden: TextView
         hidden=setting(device,"恢复隐藏推荐  ·  ${library.hidden().size} 部") {
-            library.unhideAll(); hidden.text="恢复隐藏推荐  ·  0 部"; Toast.makeText(this,"热门推荐已恢复",Toast.LENGTH_SHORT).show()
+            library.unhideAll(); hidden.text="恢复隐藏推荐  ·  0 部"; notices.show("热门推荐已恢复")
         }
         lateinit var updates: TextView
         updates=setting(device,"版本与更新  ·  ${BuildConfig.VERSION_NAME}") { updater.show(updates) }
         val license=setting(device,"开源许可") {
-            AlertDialog.Builder(this).setTitle("开源许可").setMessage("本原生版以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：N3urda/hongguoTV-updates。").setPositiveButton("关闭",null).show()
+            RayNeoDialogs.builder(this).setTitle("开源许可").setMessage("本原生版以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：N3urda/hongguoTV-updates。").setPositiveButton("关闭",null).show()
         }
         val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton); val right=listOf(backup,hidden,updates,license)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
@@ -711,7 +720,7 @@ class MainActivity: Activity() {
         left.forEachIndexed { i,v -> v.nextFocusLeftId=v.id; v.nextFocusRightId=right[i].id }
         right.forEachIndexed { i,v -> v.nextFocusLeftId=left[i].id; v.nextFocusRightId=v.id }
         nav.forEach { it.nextFocusDownId=qualityButton.id }
-        parent.addView(text("红果 TV  /  ${BuildConfig.VERSION_NAME}    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
+        parent.addView(text("红果TV  /  ${BuildConfig.VERSION_NAME}    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
         nav[tab].requestFocus()
     }
     private fun runSearch(value: String,type: ContentType=library.contentType) {
@@ -760,7 +769,7 @@ class MainActivity: Activity() {
         val description=data.series.description.ifBlank { "选择剧集开始观看" }
         val synopsis=text(description,15f,muted).apply { maxLines=if(synopsisExpanded) 20 else 2; ellipsize=TextUtils.TruncateAt.END }
         info.addView(synopsis)
-        val actions=row(); actions.setPadding(0,dp(12),0,0); info.addView(actions)
+        val actions=row(); actions.setPadding(0,dp(12),0,0); info.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(actions) },lp(-1,-2))
         val progress=library.progress(data.series.id)
         val resumeIndex=progress?.let { data.episodes.indexOf(it.episodeId).takeIf { n -> n>=0 } } ?: 0
         val resumePosition=progress?.takeIf { !it.completed && resumeIndex==it.episodeIndex }?.position ?: 0
@@ -784,19 +793,19 @@ class MainActivity: Activity() {
         val groupRow=row(); groupRow.setPadding(0,dp(3),0,dp(5))
         val maxGroup=data.episodes.lastIndex/20; group=group.coerceIn(0,maxGroup)
         val previous=addButton(groupRow,"‹ 上一组") { if(group>0) { group--; showDetail(true) } }.apply { isEnabled=group>0; isFocusable=group>0; alpha=if(group>0) 1f else .4f }
-        groupRow.addView(text("第 ${group*20+1}—${minOf((group+1)*20,data.episodes.size)} 集",16f).apply { gravity=Gravity.CENTER },lp(dp(190),dp(42)))
+        groupRow.addView(text("第 ${group*20+1}—${minOf((group+1)*20,data.episodes.size)} 集",16f).apply { gravity=Gravity.CENTER },lp(dp(120),dp(42)))
         addButton(groupRow,"下一组 ›") { if(group<maxGroup) { group++; showDetail(true) } }.apply { isEnabled=group<maxGroup; isFocusable=group<maxGroup; alpha=if(group<maxGroup) 1f else .4f }
         lateinit var jump: TextView
         jump=addButton(groupRow,"跳转集数") { tvTools.episodePicker(data.episodes.size,episodeIndex,jump) { target -> episodeIndex=target; group=target/20; showDetail(true) } }
-        content.addView(groupRow)
+        content.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(groupRow) },lp(-1,-2))
         val episodes=mutableListOf<View>()
-        (group*20 until minOf((group+1)*20,data.episodes.size)).toList().chunked(10).forEach { numbers ->
+        (group*20 until minOf((group+1)*20,data.episodes.size)).toList().chunked(5).forEach { numbers ->
             val line=row()
             numbers.forEach { index -> val item=button("${index+1}",index==episodeIndex) { playEpisode(index,if(progress?.episodeId==data.episodes[index] && !progress.completed) progress.position else 0) }; item.contentDescription="第 ${index+1} 集"; line.addView(item,lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }); episodes+=item }
-            repeat(10-numbers.size) { line.addView(Space(this),lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }) }
+            repeat(5-numbers.size) { line.addView(Space(this),lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }) }
             content.addView(line,lp(-1,dp(49)))
         }
-        episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
+        episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%5==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%5==4 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=5) v.nextFocusUpId=episodes[i-5].id; v.nextFocusDownId=if(i+5<episodes.size) episodes[i+5].id else v.id }
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
@@ -829,10 +838,11 @@ class MainActivity: Activity() {
         prefetchAttempts=0; prefetchAttemptAt=0
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if(!reuse) {
-            root.removeAllViews(); root.setBackgroundColor(Color.BLACK)
-            val view=PlayerView(this).apply {
+            root.removeAllViews(); root.setBackgroundColor(Color.TRANSPARENT)
+            stereoVideo=StereoVideoView(this).also { it.setResizeMode(frameResizeMode()); scene.addView(it,0,FrameLayout.LayoutParams(-1,-1)) }
+            val view=(layoutInflater.inflate(R.layout.rayneo_player,root,false) as PlayerView).apply {
                 useController=false; resizeMode=frameResizeMode(); isFocusable=false
-                setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.BLACK); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+                setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.TRANSPARENT); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
@@ -854,7 +864,7 @@ class MainActivity: Activity() {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
                 val renderers=androidx.media3.exoplayer.DefaultRenderersFactory(this).setEnableDecoderFallback(true)
                 ExoPlayer.Builder(this,renderers).setLoadControl(load).build().also {
-                    player=it; playerView?.player=it
+                    player=it; playerView?.player=it; stereoVideo?.bind(it)
                     it.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(),true)
                     it.setHandleAudioBecomingNoisy(true)
                 }
@@ -1021,7 +1031,7 @@ class MainActivity: Activity() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         playbackText.text="定时停止已生效 · 观看位置已保存 · 按播放可继续"
         showHud(); if(!playError && episodePanel==null) showPanel(); syncMediaSession()
-        Toast.makeText(this,"定时停止已生效",Toast.LENGTH_LONG).show()
+        notices.show("定时停止已生效",1)
     }
     private fun showSleepPicker(anchor: TextView) {
         val labels=listOf("关闭定时停止","15 分钟后","30 分钟后","60 分钟后","90 分钟后","本集播完","再播完 3 集","再播完 5 集")
@@ -1037,7 +1047,7 @@ class MainActivity: Activity() {
     }
     private fun showFramePicker(anchor: TextView,inPlayer: Boolean) {
         tvTools.choose("全局画面模式",listOf("完整画面 · 保留比例与全部内容","等比铺满 · 会裁掉部分画面与字幕","拉伸铺满 · 画面比例会改变"),anchor,{ index ->
-            library.frameMode=VideoFrameMode.entries[index]; playerView?.resizeMode=frameResizeMode()
+            library.frameMode=VideoFrameMode.entries[index]; playerView?.resizeMode=frameResizeMode(); stereoVideo?.setResizeMode(frameResizeMode())
             if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "画面 " else "画面模式  ·  ")+library.frameMode.label
         })
     }
@@ -1078,7 +1088,7 @@ class MainActivity: Activity() {
         if(speedDialog!=null) return
         val speeds=PlaybackSpeed.options
         val selected=speeds.indexOf(library.playbackSpeed)
-        val dialog=AlertDialog.Builder(this).setTitle("全局默认倍速")
+        val dialog=RayNeoDialogs.builder(this).setTitle("全局默认倍速")
             .setSingleChoiceItems(speeds.map(PlaybackSpeed::label).toTypedArray(),selected) { popup,index ->
                 library.playbackSpeed=speeds[index]
                 if(inPlayer) player?.setPlaybackSpeed(library.playbackSpeed)
@@ -1095,7 +1105,7 @@ class MainActivity: Activity() {
     }
     private fun showQualityPicker(anchor: TextView,inPlayer: Boolean) {
         val options=PlaybackQuality.options
-        val dialog=AlertDialog.Builder(this).setTitle("全局默认清晰度")
+        val dialog=RayNeoDialogs.builder(this).setTitle("全局默认清晰度")
             .setSingleChoiceItems(options.map { "${it}P" }.toTypedArray(),options.indexOf(library.maxQuality)) { popup,index ->
                 val target=options[index]; val changed=library.maxQuality!=target
                 library.maxQuality=target; popup.dismiss()
@@ -1142,6 +1152,7 @@ class MainActivity: Activity() {
         speedDialog?.dismiss(); speedDialog=null
         main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         playerListener?.let { player?.removeListener(it) }; playerListener=null
+        stereoVideo?.let { it.release(); scene.removeView(it) }; stereoVideo=null
         video?.close(); video=null; playerView?.player=null; playerView=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
         closeTransport(playbackHttp); playbackHttp=null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1222,7 +1233,7 @@ class MainActivity: Activity() {
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
-        updater.pause()
+        updater.pause(); notices.close()
         foreground=false; main.removeCallbacks(tick); cancelRecovery(); cancelPrefetch(); mediaSession.deactivate()
         sleepTimer.cancel(); favoriteMonitor.stop(); detailAutoplay=false; requestedAutoplay=false; pausedForLifecycle=true
         player?.pause(); saveProgress(); library.flush(); super.onPause()

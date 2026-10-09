@@ -2,6 +2,7 @@
 package com.hongguotv.nativeapp
 
 import android.app.Activity
+import com.hongguotv.nativeapp.rayneo.RayNeoDialogs
 import android.app.Dialog
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -16,7 +17,7 @@ class EpisodePanel(
     private val locate: (Int,View,(Int)->Unit)->Unit,
     private val select: (Int)->Unit,private val closed: ()->Unit
 ) {
-    private val dialog=Dialog(activity)
+    private val dialog=RayNeoDialogs.ContentDialog(activity)
     private var group=current/20
     private var focused=current
     private fun dp(n: Int)=(n*activity.resources.displayMetrics.density).toInt()
@@ -30,12 +31,7 @@ class EpisodePanel(
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setOnDismissListener { closed() }
         render(); dialog.show()
-        dialog.window?.apply {
-            setBackgroundDrawableResource(android.R.color.transparent)
-            setGravity(Gravity.END or Gravity.CENTER_VERTICAL)
-            attributes=attributes.apply { x=(activity.resources.displayMetrics.widthPixels*.05f).toInt() }
-            setLayout(minOf(dp(520),(activity.resources.displayMetrics.widthPixels*.8f).toInt()),(activity.resources.displayMetrics.heightPixels*.9f).toInt())
-        }
+        dialog.window?.let(RayNeoDialogs::configure)
     }
     fun dismiss()=dialog.dismiss()
     private fun render() {

@@ -4,8 +4,9 @@ package com.hongguotv.core
 import org.json.JSONObject
 
 object PlaybackQuality {
+    const val DEFAULT = 480
     val options=listOf(480,720,1080)
-    fun normalize(value: Int)=value.takeIf { it in options } ?: 1080
+    fun normalize(value: Int)=value.takeIf { it in options } ?: DEFAULT
 }
 
 /** One automatic recovery budget per episode; only an explicit user retry resets it. */
