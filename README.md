@@ -1,4 +1,18 @@
-# hongguoTV
+# 红果TV
+
+本分支是 [N3urda/hongguoTV](https://github.com/N3urda/hongguoTV) Kotlin 原生版的 **RayNeo X3 Pro 适配版本**，应用显示名为「红果TV」。
+
+**[下载 X3 Pro 适配版](https://github.com/WayneShao/hongguoTV/releases/latest)** · [适配说明、构建与验证范围](kotlin-tv/RAYNEO.md)
+
+- 全窗口双目 UI、单播放器双目视频；默认清晰度 480P。
+- 镜腿四向滑动移动原生焦点，单击确认、双击返回、双指轻点打开菜单。
+- 列表按正在浏览的条目恢复光标，保留弹窗和页面的焦点；清晰度连续导航及双指菜单已由用户实机确认。
+- 包名 `com.hongguotv.rayneo`，与上游独立安装；收藏和观看记录在本机保存，尚未接入红果官方账号登录/同步。
+- 本适配分支独立维护，后续从本仓库 Release 更新。
+
+以下保留上游项目说明，其中上游包名、下载链接及自动更新描述不适用于本适配包。
+
+---
 
 当前分支提供 **Kotlin 原生独立 APK**：安装后联网即可使用，无需 Node / Docker。最低 Android 8.0，电视遥控器操作。
 
