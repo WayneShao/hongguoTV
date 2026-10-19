@@ -23,6 +23,11 @@ public final class GestureCoreTest {
         g.down(0, 0, 1000); g.up(0, 0, 1040); g.down(0, 0, 1100);
         eq(GestureCore.Action.BACK, g.up(0, 0, 1140));
         eq(GestureCore.Action.NONE, g.confirm(2000));
+        // Separate temple taps may land far apart; only movement within a tap is a swipe.
+        g.down(841, 255, 2100); g.up(841, 255, 2134);
+        g.down(705, 234, 2251);
+        eq(GestureCore.Action.BACK, g.up(705, 234, 2285));
+        eq(GestureCore.Action.NONE, g.confirm(2600));
         g.down(0, 0, 2000); eq(GestureCore.Action.MENU, g.up(0, 0, 2600));
         float[][] ends = {{50, 2}, {-50, 2}, {2, 50}, {2, -50}};
         GestureCore.Action[] directions = {GestureCore.Action.RIGHT, GestureCore.Action.LEFT, GestureCore.Action.DOWN, GestureCore.Action.UP};

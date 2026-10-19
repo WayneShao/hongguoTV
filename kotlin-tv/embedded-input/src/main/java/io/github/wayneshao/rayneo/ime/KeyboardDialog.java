@@ -87,7 +87,7 @@ final class KeyboardDialog extends Dialog implements View.OnAttachStateChangeLis
         modeButton = button(controls, "英文", () -> changeMode(false), 1);
         button(controls, "123 / 符号", () -> changeMode(true), 1.6f);
         voiceButton = button(controls, "语音", this::voice, 1);
-        button(controls, "收起", this::dismiss, 1);
+        button(controls, "收起", this::cancelEditing, 1);
         button(controls, "完成 / 搜索", this::submit, 1.8f);
         setContentView(surface);
         labels(); refreshPreview();
@@ -270,6 +270,12 @@ final class KeyboardDialog extends Dialog implements View.OnAttachStateChangeLis
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
         if (!focused) { if (gestures != null) gestures.cancel(); cancelVoice(); }
+    }
+    @Override public void onBackPressed() { cancelEditing(); }
+    private void cancelEditing() {
+        if (closed) return;
+        dismiss();
+        if (target.valid()) target.cancel();
     }
     @Override public void dismiss() {
         if (!closed) {

@@ -63,6 +63,12 @@ public final class NativeEditor implements EditorTarget {
         if (direction > 0 && cursor < text.length()) cursor = Character.offsetByCodePoints(text, cursor, 1);
         Selection.setSelection(text, cursor);
     }
+    public void cancel() {
+        EditText e = reference.get(); if (e == null || !valid()) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        e.dispatchKeyEventPreIme(new android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_BACK, 0));
+        e.dispatchKeyEventPreIme(new android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_BACK, 0));
+    }
     public void submit() {
         EditText e = reference.get(); if (e == null) return;
         int action = e.getImeOptions() & EditorInfo.IME_MASK_ACTION;

@@ -38,6 +38,10 @@ object RayNeoInput {
     }
 
     private class InputCallback(val window: Window, val original: Window.Callback, val keyboard: android.app.Dialog? = null) : Window.Callback by original {
+        private fun trace(message: String) {
+            if (keyboard != null) android.util.Log.d("HongguoKeyboardInput", message)
+            RayNeoInput.trace(message)
+        }
         private val root = window.decorView
         private val handler = Handler(Looper.getMainLooper())
         // The glasses' framework touch slop is 65 px, unsuitable for short temple swipes.
@@ -56,7 +60,11 @@ object RayNeoInput {
         private var recoveryQueued = false
         private var recoveryDeadline = 0L
         private val focusListener = ViewTreeObserver.OnGlobalFocusChangeListener { old, next ->
-            if (target != null && target?.focus !== next) cancel()
+            // Android enters touch mode before delivering the second temple DOWN.
+            // Native buttons lose focus transiently; this is not a new edit target.
+            val touchModeLoss = next == null && root.isInTouchMode &&
+                target?.focus === old && old != null && inside(old)
+            if (target != null && target?.focus !== next && !touchModeLoss) cancel()
             remember(old); remember(next)
             requestRecovery()
         }
@@ -129,10 +137,16 @@ object RayNeoInput {
             if (hasFocus) requestRecovery()
         }
         override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+            trace("incoming key=${event.keyCode} action=${event.action} device=${event.device?.name}")
             if (keyboard != null && io.github.wayneshao.rayneo.ime.EmbeddedInput.key(keyboard, event)) {
                 cancel(); return true
             }
             if (GestureCore.source(event.device?.name) < 0) return true
+            if (keyboard != null && event.keyCode in listOf(KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_BUTTON_B)) {
+                cancel()
+                if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) keyboard.onBackPressed()
+                return true
+            }
             // Native DPAD/mouse behavior remains authoritative and invalidates a delayed tap.
             cancel()
             val handled = original.dispatchKeyEvent(event)
@@ -145,6 +159,7 @@ object RayNeoInput {
 
         private fun motion(e: MotionEvent): Boolean {
             if (keyboard != null && io.github.wayneshao.rayneo.ime.EmbeddedInput.motion(keyboard, e)) {
+                trace("module consumed action=${e.actionMasked} count=${e.pointerCount}")
                 cancel(); return true
             }
             val source = GestureCore.source(e.device?.name)
@@ -182,6 +197,10 @@ object RayNeoInput {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_BUTTON_PRESS -> {
                     if (touching) return true
                     hover = false
+                    if (gestures.pending() && root.findFocus() == null) {
+                        prepare()
+                        if (target?.valid() != true) cancel()
+                    }
                     // An expired single tap is delivered before capturing a new target.
                     if (gestures.pending()) {
                         val expired = gestures.confirm(e.eventTime)
@@ -330,6 +349,13 @@ object RayNeoInput {
 
         private fun deliver(action: GestureCore.Action) {
             if (!root.hasWindowFocus() || !root.isAttachedToWindow) return
+            // Dialog's default BACK dispatch relies on framework key tracking.
+            // A recognized temple double tap already owns the complete action.
+            if (action == GestureCore.Action.BACK && keyboard != null) {
+                cancel()
+                keyboard.onBackPressed()
+                return
+            }
             val code = when (action) {
                 GestureCore.Action.CENTER -> KeyEvent.KEYCODE_DPAD_CENTER
                 GestureCore.Action.BACK -> KeyEvent.KEYCODE_BACK

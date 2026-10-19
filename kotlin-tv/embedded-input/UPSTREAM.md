@@ -12,6 +12,18 @@ The small keyboard window uses a software layer; it does not alter a host player
 
 ## Integration contract
 
+- Show/close/status APIs run on the UI thread. `show` rejects API <23 and a
+  finishing/destroyed Activity, and cleans up its own failed session on bad-token
+  or invalid-display errors. It returns false on these failures; it does not retry.
+- User BACK/collapse dismisses the keyboard and calls `EditorTarget.cancel()`.
+  `NativeEditor` delivers pre-IME BACK DOWN/UP to the original editor, without an
+  editor action. Programmatic `close`, session replacement, detach and failed
+  creation only dismiss. A custom target can override the optional cancel callback.
+- Wire original hide requests too. `closeWindow(view)` closes the session belonging
+  to that view's window, even if another control requested hiding it. `close(target)`
+  remains identity-specific, so stale logical editors cannot close newer sessions.
+  `isShowing(owner)` lets a host deduplicate requests before waiting for window focus.
+  Hosts own cancellation of any deferred show they create; this module does not queue them.
 - Pass `NativeEditor(EditText)` to `EmbeddedInput.show(target, host)` when the
   host would request a system keyboard. Disable `showSoftInputOnFocus` for
   those fields. Preserve original text filters, watchers, selection and action
@@ -23,6 +35,13 @@ The small keyboard window uses a software layer; it does not alter a host player
   `EmbeddedWebView.pageFinished(view)` from the original client's page callback.
   Retain the original WebViewClient and its login/navigation/cookie behavior.
   DOM fields have separate logical identities even inside one WebView.
+  Completion sends change and cancellable Enter DOWN/UP. For non-textarea form
+  controls, the fallback is `requestSubmit()` only when neither Enter event was
+  cancelled and no synchronous submit event was observed. This retains constraint
+  validation and avoids duplicating observable synchronous form submission.
+  A page handling Enter with asynchronous/custom network actions must cancel default
+  behavior; those actions cannot be inferred from DOM submit events. Real-page
+  compatibility still needs a WebView test. No `form.submit()` or button guessing.
 - `Host.attachInput(dialog, surface)` may attach the host's gesture dispatcher.
   It must not wrap this window in another stereo renderer. The supplied surface
   accepts a single logical pointer and maps physical right-eye mouse events
@@ -86,10 +105,15 @@ input and real login-page HTML remain pending on this initial test package.
 
 The first preview was delivered locally on October 16, then installed October 19.
 The user reported that the keyboard could not be opened. A narrower explicit-entry
-fix was installed with matching hash and unchanged boot ID, but no successful
-real keyboard display was established. Keyboard gestures now have desktop tests;
-do not describe their physical behavior as accepted. See the dated project record
-for each later package's installation status. The accepted input-repair APK
+fix and then the gesture candidate were installed. A later device screenshot captured
+the stereo keyboard window, without proving every entry or native/physical behavior.
+The subsequent shared-module fix build was initially local only. After explicit
+user authorization it was installed once with data preserved, matching APK hash
+and unchanged boot ID. It was not launched or physically tested.
+It passes 84 Android desktop tests, 13 Python guards and 11 source-derived web event
+cases; see `docs/shared-input-fixes-2026-10-19.md` in the project root. Source hashes
+for cross-app import are in `src/embedded-input/module-version.json`.
+Do not describe physical behavior as accepted. The accepted input-repair APK
 `aa132e5c327b7058ea18e52826abb378254b8ed19f14e4d56d656d36be5cce31`
 remains the rollback. Keep the experimental package on `rayneo/in-app-keyboard`
 until device acceptance; do not merge it into the accepted baseline automatically.

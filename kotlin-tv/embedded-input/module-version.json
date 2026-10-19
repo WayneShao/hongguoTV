@@ -1,0 +1,60 @@
+{
+  "revision": "shared-input-fixes-20261019",
+  "repository": "WayneShao/BBLL-RayNeo",
+  "base_commit": "32ac674b46555ccc557887add49a00172c118dd2",
+  "source_root": "src/embedded-input/java",
+  "hash_normalization": "UTF-8 with LF newlines",
+  "scope": "Local shared-module fixes from SmartTube report plus web Enter submit deduplication; no host dependencies",
+  "files": [
+    {
+      "path": "com/feelime/ime/nativeengine/NativeSmoke.java",
+      "base_sha256": "b68a898ea059fdd6fe36a4bc78d9334c3dfcaf66c8debe102a6690decc0791d9",
+      "sha256": "b68a898ea059fdd6fe36a4bc78d9334c3dfcaf66c8debe102a6690decc0791d9"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/EditorTarget.java",
+      "base_sha256": "721d2429061383ca56b1c3603a3ac2a67ea1e424df6c33a75d73868d9ff76809",
+      "sha256": "e8298948230c26f26250dd5900a0b2e691f4042fb422193d3de4af4b9cee4906"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/EmbeddedInput.java",
+      "base_sha256": "2244aaf2d651515fc720e51bade190fdd2f12c82c6a1c751bb9d03fba887e3a2",
+      "sha256": "fed5b65a6c47fde46e86073bb8c415b4ba768b89158863340d8c95e8c42eab4d"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/EmbeddedWebView.java",
+      "base_sha256": "fb6c996b0bb917106c160d5109c326e362036212116be2e4373ac941accb82d4",
+      "sha256": "ddce8a69e895367bb84bc9315c4c827c97a646cf4bce0461eddedde1176c1624"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/KeyboardDialog.java",
+      "base_sha256": "48e39e347afb8560e53e00229a24e4c71c7885663990fd2b2985cc69ebc9568d",
+      "sha256": "f1bd7256fa3d7583dfa77ecaeea95b3fd7454babcb638f6388861e84946b13a3"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/KeyboardGesture.java",
+      "base_sha256": "c06a58c8a2e13e03deb6cf7d9d1e8f3ce62ef2d1dc763d9427a2d4a721c52ae2",
+      "sha256": "c06a58c8a2e13e03deb6cf7d9d1e8f3ce62ef2d1dc763d9427a2d4a721c52ae2"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/KeyboardSurface.java",
+      "base_sha256": "b9d66d5193fe6b1901ab5233ddb25a60dfc3781f7bcf9b31e6da3dbf423a486d",
+      "sha256": "b9d66d5193fe6b1901ab5233ddb25a60dfc3781f7bcf9b31e6da3dbf423a486d"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/NativeEditor.java",
+      "base_sha256": "a61c0833e7c30516c7a1da3309c45adde1f2bf46a496df903f22eb1cb844145e",
+      "sha256": "dbb58e680375bb55fe348f29c3074a96600aed673a47fab531e64d6ab1f7a38b"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/OfflineVoice.java",
+      "base_sha256": "b65549ddcd09c001c0662b0e4fe4b05a1a16b8dca8787b753b93d14ad75fbdad",
+      "sha256": "b65549ddcd09c001c0662b0e4fe4b05a1a16b8dca8787b753b93d14ad75fbdad"
+    },
+    {
+      "path": "io/github/wayneshao/rayneo/ime/PinyinSession.java",
+      "base_sha256": "b71b063499e76425ce73d6f36b9feeee0a4687f3e76fd623f1ac7dc477cbe519",
+      "sha256": "b71b063499e76425ce73d6f36b9feeee0a4687f3e76fd623f1ac7dc477cbe519"
+    }
+  ]
+}

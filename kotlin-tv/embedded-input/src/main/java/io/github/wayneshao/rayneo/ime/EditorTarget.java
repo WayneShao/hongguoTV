@@ -15,5 +15,6 @@ public interface EditorTarget {
     void clear();
     void move(int direction);
     void submit();
+    default void cancel() { }
     default void observe(Runnable changed) { }
 }
