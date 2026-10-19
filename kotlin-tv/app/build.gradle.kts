@@ -30,6 +30,7 @@ android {
     packaging { resources.excludes += setOf("META-INF/versions/**", "META-INF/*.kotlin_module") }
 }
 dependencies {
+    implementation(project(":embedded-input"))
     testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core:1.8.0")
     implementation("com.google.zxing:core:3.5.3")

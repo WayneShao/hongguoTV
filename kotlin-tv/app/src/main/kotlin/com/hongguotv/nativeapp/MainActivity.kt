@@ -378,6 +378,7 @@ class MainActivity: Activity() {
             searchActions.addAll(listOf(recent,phone))
             typeButtons.values.forEach { it.nextFocusDownId=input.id }
             input.setOnEditorActionListener { _,_,_-> search(); true }; container.addView(searchRow)
+            com.hongguotv.nativeapp.rayneo.SearchKeyboard.bind(input)
         } else if(tab==2) {
             val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
             heading.addView(text("漫剧热播榜",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
@@ -1240,6 +1241,7 @@ class MainActivity: Activity() {
         player?.pause(); saveProgress(); library.flush(); super.onPause()
     }
     override fun onStop() {
+        com.hongguotv.nativeapp.rayneo.SearchKeyboard.close(searchInput)
         restoreStoppedPage=true; generation++; cancelWork(); tvTools.close()
         if(screen=="player") { startPosition=currentPosition(); saveProgress(); releasePlayer() }
         artwork.cancelPage(clearMemory=true); library.flush(); super.onStop()

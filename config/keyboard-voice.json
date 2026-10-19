@@ -1,0 +1,133 @@
+{
+  "version": "v1.13.6",
+  "aar": {
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-static-link-onnxruntime-1.13.6.aar",
+    "sha256": "01e87037afca2ed49085062aace5c012e60321e8e23e3a72b6d9ac02c843f66c"
+  },
+  "model_archive": {
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20-mobile.tar.bz2",
+    "sha256": "45b8d04fe8faf5146397ff2e71d90ca8effdfcbe9adc30fdce769e92cabd6b03"
+  },
+  "files": [
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/EndpointConfig.java",
+      "sha256": "ba0c9ed4edf883fef679a2ae1f18be756019d094abc581d4a65162fbfc2ca523",
+      "size": 1853
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/EndpointRule.java",
+      "sha256": "742e00cc9361a933bfef67945c5507e6de6561c67631722c67b12914fa36c03d",
+      "size": 1648
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/FeatureConfig.java",
+      "sha256": "f7c52b55524e0f519cb965f2be0b41ce93e3f6eea1f34cdcb9d0d9eae34cd1bd",
+      "size": 1317
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/HomophoneReplacerConfig.java",
+      "sha256": "1f80c0b210394551f04956cb507c8f5f966ed5ce808c051caa2a461e1cd9957a",
+      "size": 1321
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/LibraryLoader.java",
+      "sha256": "be01db247bda7a67caeffa42ea0c1b0ff7150f722aa11099f1f19fb1fb9b6445",
+      "size": 533
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/LibraryUtils.java",
+      "sha256": "21c0a9b91415ace9c7481abfb3731f6d6efc075a91cda7b45bac5dcf6c32fb11",
+      "size": 8501
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineCtcFstDecoderConfig.java",
+      "sha256": "6bc4d2fca4031d69c33773cb7c821f3c938f54625ba700eb02b8209a15ab115c",
+      "size": 1001
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineLMConfig.java",
+      "sha256": "03c956cab8b8eea371b54642a9bfff2f8a3eb909c111c4b0bf447609d0587483",
+      "size": 958
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineModelConfig.java",
+      "sha256": "0965ddb7e25e8ea1fb9dc9fba8f24a3967fc22843f276b0811965be21e043fb2",
+      "size": 4835
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineNeMoCtcModelConfig.java",
+      "sha256": "91e93b3582bfaa783af82a568bd60b3514b2aabda7de3fc57e4180c0dd8142c4",
+      "size": 684
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineParaformerModelConfig.java",
+      "sha256": "d1e33112aa44954c2323cbbeeeb2069ae3ec62b93e8700dd61d657462a9fc180",
+      "size": 1048
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineRecognizer.java",
+      "sha256": "58f4eac89403e3d9e502ae36fe5ea5e42473baaaf87c2f279a6c80bfbd3a01fb",
+      "size": 2339
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineRecognizerConfig.java",
+      "sha256": "3414230b12a8f1101ca28fe8dee3ee6eaa00b1eb05ccb72f285635e51762a619",
+      "size": 4727
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineRecognizerResult.java",
+      "sha256": "4fbbd3193380ae9ff61618e9299baddf85700844e3ad3bd95d9accf8fecadb17",
+      "size": 744
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineStream.java",
+      "sha256": "af9baa14b2b2bc8c6cf8be177728d79fff0f63720570f51d75a7739c475ada2c",
+      "size": 1647
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineToneCtcModelConfig.java",
+      "sha256": "9e46cf4e79a48f9b15858a96efceb3801e24d3a5f7b67df22029f3f68ea51a4f",
+      "size": 648
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineTransducerModelConfig.java",
+      "sha256": "154c650e676f6a41159eb46714a6b5b7be5b94760f8dea52079c12f31de59f3d",
+      "size": 1695
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/OnlineZipformer2CtcModelConfig.java",
+      "sha256": "a289c724d33c72110ac37552433712ac44c4d3719784f6ddaf83e53c169125f7",
+      "size": 710
+    },
+    {
+      "path": "java/com/k2fsa/sherpa/onnx/QnnConfig.java",
+      "sha256": "1d704a241b391e351975f3ebef97bd39b9f260482028a00abe3dd48e24c90ddb",
+      "size": 1354
+    },
+    {
+      "path": "model/decoder.onnx",
+      "sha256": "2e3b5ec371f8899ee6acd829fd753ba45772df57a91bdf37cde3136354e7db7d",
+      "size": 13876452
+    },
+    {
+      "path": "model/encoder.int8.onnx",
+      "sha256": "f559f422d970323e0c266aaa3c56cf6d1a3a4bc0c0822124727686c1e43e9447",
+      "size": 105276499
+    },
+    {
+      "path": "model/joiner.int8.onnx",
+      "sha256": "1ed689c5ed19dbaa725d9d191bb4822b5f4855a39e1ffd28cbc1f340d25b2ee0",
+      "size": 3228404
+    },
+    {
+      "path": "model/tokens.txt",
+      "sha256": "a8e0e4ec53810e433789b54a5c0134a7eaa2ffca595a6334d54c00da858841d3",
+      "size": 56317
+    },
+    {
+      "path": "jni/arm64-v8a/libsherpa-onnx-jni.so",
+      "sha256": "8b0ddcef4f07f05432123e982c00429488e3861390c8c62d32359b5935fb14c0",
+      "size": 23647720
+    }
+  ]
+}

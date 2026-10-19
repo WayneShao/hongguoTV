@@ -1,0 +1,2 @@
+-keep class com.feelime.ime.nativeengine.** { *; }
+-keep class com.k2fsa.sherpa.onnx.** { *; }

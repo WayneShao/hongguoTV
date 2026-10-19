@@ -46,7 +46,9 @@ internal object DeviceIdentity {
 
     private fun valid(value: String?): Boolean = value?.matches(Regex("[1-9][0-9]{15}")) == true
     private fun next(): String {
-        val value = 1_000_000_000_000_000L + random.nextLong(9_000_000_000_000_000L)
-        return value.toString()
+        return buildString {
+            append(1 + random.nextInt(9))
+            repeat(15) { append(random.nextInt(10)) }
+        }
     }
 }

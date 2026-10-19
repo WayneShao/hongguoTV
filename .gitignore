@@ -37,3 +37,6 @@ keystore.properties
 .externalNativeBuild/
 /ios/Pods/
 /ios/build/
+
+/_local/
+/build-embedded-input.log
