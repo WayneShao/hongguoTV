@@ -6,7 +6,7 @@ The host uses native Android Views. The search page owns the sole EditText that 
 
 ## Rebuild
 
-Sources copied from BBLL-RayNeo embedded-input at 659599e57c4c08175c47ba47bbc8ad66e2a59fa2. BBLL-specific uncommitted bridge changes were read but neither copied nor modified. Own module source is in embedded-input/src/main/java. Third party versions and SHA-256 values are in config/keyboard-vendor.json and config/keyboard-voice.json.
+Sources copied from BBLL-RayNeo embedded-input at 32ac674b46555ccc557887add49a00172c118dd2. BBLL-specific uncommitted bridge changes were read but neither copied nor modified. Own module source is in embedded-input/src/main/java. Third party versions and SHA-256 values are in config/keyboard-vendor.json and config/keyboard-voice.json.
 
 From repository root:
 
@@ -34,3 +34,18 @@ Not accepted yet: physical temple gestures, optical comfort, speech recognition/
 
 Artifact: ../outputs/hongguoTV-rayneo-embedded-input-preview.apk (relative to repository parent workspace), 152788077 bytes.
 SHA-256: 971210CF26AB926A1D6055232C533D145E6E229E08E9AA3FA83341C45D9342FB
+
+
+## Keyboard gestures update, 2026-10-19
+
+Imported the exact clean reference worktree at 32ac674b46555ccc557887add49a00172c118dd2. No BBLL host bridge or page rules are used. The native search editor remains the actual host input target.
+
+SearchKeyboard calls RayNeoInput.installKeyboard(dialog). Its callback passes touch/generic events to EmbeddedInput.motion and keys to EmbeddedInput.key before ordinary handling. A consumed event cancels this callback's pending confirm, delivery, single-finger gesture and two-finger menu state. Ordinary install(window) leaves keyboard owner null and retains the existing TwoFingerTap menu path. The module owns recording and cancellation on focus loss/dismissal.
+
+Keyboard only: two-finger hold (~400 ms) starts voice, first release stops/commits; direct upward swipe clears all text and composition; upward swipe after hold cancels voice while retaining previous text. Third finger cancels/drains. Timed-out voice result is buffered until release and can still be cancelled. Native input filters and actions remain unchanged.
+
+Module tests: 28 passed (9 editor contracts, 13 gesture state-machine cases, 6 window/session cases). BBLL-specific Runtime/media-fallback test was not transplanted; these results do not validate Hongguo physical dispatch. Physical gesture/voice/menu acceptance is deferred at the user's request.
+
+Gesture release delivery: 0.9.0-rayneo.4-input-gestures (versionCode 12), BUILD SUCCESSFUL. APK in parent workspace outputs/hongguoTV-rayneo-embedded-input-gestures.apk. SHA-256 9939B53FB988D5D0BE78DE0CDE190BA733F5E3BA1C60EF795EF1494A0CD18E0C. Matching certificate verified, adb install -r succeeded, device base.apk SHA-256 matches. Actual search EditText tap opens the keyboard and Rime-ready status is visible in hierarchy. Keyboard left open; no recording or video started. Physical testing deferred by user. Lint remains excluded as in previous build.
+
+Rollback for this gesture update: parent workspace outputs/hongguoTV-rayneo-embedded-input-preview.apk, adb install -r -d, preserves data with matching certificate. This earlier input preview contains the Android-compatible ID generator fix.

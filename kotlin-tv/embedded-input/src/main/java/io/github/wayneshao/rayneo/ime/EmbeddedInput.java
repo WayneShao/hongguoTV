@@ -13,6 +13,13 @@ public final class EmbeddedInput {
     }
     private static final WeakHashMap<View, WeakReference<KeyboardDialog>> WINDOWS = new WeakHashMap<>();
     private EmbeddedInput() { }
+    /** Hosts that consume physical events first must call this before their normal gesture routing. */
+    public static boolean motion(Dialog dialog, android.view.MotionEvent event) {
+        return dialog instanceof KeyboardDialog && ((KeyboardDialog) dialog).physicalMotion(event);
+    }
+    public static boolean key(Dialog dialog, android.view.KeyEvent event) {
+        return dialog instanceof KeyboardDialog && ((KeyboardDialog) dialog).physicalKey(event);
+    }
     public static boolean show(EditorTarget target, Host host) {
         View owner = target.owner();
         if (owner == null || !target.valid()) return false;

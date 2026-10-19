@@ -8,9 +8,13 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.InputDevice;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -32,6 +36,14 @@ final class KeyboardDialog extends Dialog implements View.OnAttachStateChangeLis
     private boolean ascii, symbols, upper, closed, ready;
     private int symbolPage;
     private OfflineVoice voice;
+    private int voiceGeneration, pinyinGeneration;
+    private boolean heldVoice;
+    private String heldResult;
+    private KeyboardGesture gestures;
+    private int gestureDevice = Integer.MIN_VALUE;
+    private boolean haveEvent, lastConsumed;
+    private long lastEventSignature;
+    private long lastMultiTime = Long.MIN_VALUE;
     private KeyboardSurface surface;
     private final String alphabet = "qwertyuiopasdfghjklzxcvbnm";
     private final String symbolKeys = "1234567890@#%&*()-+=_.,!?/:;'\"[]{}\\<>$^`~|";
@@ -88,19 +100,25 @@ final class KeyboardDialog extends Dialog implements View.OnAttachStateChangeLis
         target.owner().addOnAttachStateChangeListener(this);
         target.observe(() -> { if (live()) refreshPreview(); });
         letters[0].requestFocusFromTouch();
+        startPinyin();
+    }
+    private void startPinyin() {
+        final int generation = ++pinyinGeneration;
+        if (pinyin != null) pinyin.close();
+        ready = false;
         pinyin = new PinyinSession(getContext(), new PinyinSession.Listener() {
             @Override public void result(String committed, String preedit, String[] values, boolean previous, boolean next) {
-                if (!live()) return;
+                if (generation != pinyinGeneration || !live()) return;
                 ready = true;
                 if (!committed.isEmpty()) target.commit(committed);
                 composition = preedit; words = values;
                 for (int i = 0; i < candidates.length; i++) candidates[i].setText(i < words.length ? words[i] : "·");
-                status.setText(preedit.isEmpty() ? (ascii ? "英文直接输入" : "拼音输入 · 选择候选词上屏") : preedit);
+                if (voice == null || !voice.active()) status.setText(preedit.isEmpty() ? (ascii ? "英文直接输入" : "拼音输入 · 选择候选词上屏") : preedit);
                 refreshPreview();
             }
-            @Override public void failure() { if (live()) { ready = false; status.setText("拼音加载失败，可先用英文或语音，重新打开可重试"); } }
+            @Override public void failure() { if (generation == pinyinGeneration && live()) { ready = false; status.setText("拼音加载失败，可先用英文或语音，重新打开可重试"); } }
             @Override public void unhandled(int key) {
-                if (!live()) return;
+                if (generation != pinyinGeneration || !live()) return;
                 if (key == 0x20) target.commit(" "); else if (key == 0xff08) target.delete();
                 refreshPreview();
             }
@@ -155,28 +173,111 @@ final class KeyboardDialog extends Dialog implements View.OnAttachStateChangeLis
         target.submit(); dismiss();
     }
     private void voice() {
-        if (waiting()) return;
-        if (target.password()) { status.setText("密码输入不启用语音"); return; }
-        if (!composition.isEmpty()) { status.setText("请先选择候选词"); return; }
         if (voice != null && voice.active()) { voice.stop(); return; }
-        if (!OfflineVoice.permission(getContext())) { status.setText("请允许麦克风权限，然后再次选择语音"); return; }
+        startVoice(false);
+    }
+    private boolean startVoice(final boolean holdToTalk) {
+        if (voice != null && voice.active()) return false;
+        if (waiting()) return false;
+        if (target.password()) { status.setText("密码输入不启用语音"); return false; }
+        if (!composition.isEmpty()) { status.setText("请先选择候选词"); return false; }
+        if (!OfflineVoice.permission(getContext())) { status.setText("请允许麦克风权限，然后重新开始语音"); return false; }
+        final int generation = ++voiceGeneration;
+        heldVoice = holdToTalk; heldResult = null;
         voice = new OfflineVoice(getContext(), new OfflineVoice.Listener() {
-            public void status(String message) { if (live()) status.setText(message); }
-            public void result(String text) { if (live()) { target.commit(text); refreshPreview(); } }
-            public void stopped() { if (live()) voiceButton.setText("语音"); }
+            public void status(String message) {
+                if (generation == voiceGeneration && live()) status.setText(heldVoice && heldResult != null
+                        ? "识别完成 · 松手填入，上划取消"
+                        : holdToTalk && message.startsWith("正在听") ? "正在录音 · 松手识别，上划取消（最长 20 秒）" : message);
+            }
+            public void result(String text) {
+                if (generation != voiceGeneration || !live()) return;
+                if (heldVoice) heldResult = text;
+                else { target.commit(text); refreshPreview(); }
+            }
+            public void stopped() { if (generation == voiceGeneration && live()) voiceButton.setText("语音"); }
         });
         voiceButton.setText("结束"); voice.start();
+        return voice.active();
     }
+    private void finishHeldVoice() {
+        heldVoice = false;
+        if (voice != null) voice.stop();
+        if (heldResult != null && live()) {
+            String result = heldResult; heldResult = null; target.commit(result); refreshPreview(); status.setText("语音已填入");
+        }
+    }
+    private void cancelVoice() {
+        voiceGeneration++;
+        heldVoice = false; heldResult = null;
+        if (voice != null) voice.cancel();
+        voice = null;
+        if (voiceButton != null) voiceButton.setText("语音");
+    }
+    void clearText() {
+        if (!live()) return;
+        cancelVoice();
+        composition = ""; words = new String[0];
+        for (Button candidate : candidates) candidate.setText("·");
+        startPinyin();
+        target.clear(); refreshPreview(); status.setText("已清空");
+    }
+    boolean physicalMotion(MotionEvent event) {
+        if (closed || event == null) return false;
+        InputDevice device = event.getDevice();
+        if (device == null || !"cyttsp5_mt".equals(device.getName())) return false;
+        if (!isShowing() || !getWindow().getDecorView().hasWindowFocus() || !target.valid()) {
+            if (gestures != null) gestures.cancel();
+            return false;
+        }
+        if (gestureDevice != event.getDeviceId()) {
+            if (gestures != null) gestures.cancel();
+            gestureDevice = event.getDeviceId(); haveEvent = false;
+            InputDevice.MotionRange x = device.getMotionRange(MotionEvent.AXIS_X), y = device.getMotionRange(MotionEvent.AXIS_Y);
+            gestures = new KeyboardGesture(new Handler(Looper.getMainLooper()), new KeyboardGesture.Actions() {
+                public boolean available() { return !closed && isShowing() && getWindow().getDecorView().hasWindowFocus() && target.valid(); }
+                public boolean startVoice() { return KeyboardDialog.this.startVoice(true); }
+                public void stopVoice() { finishHeldVoice(); }
+                public void cancelVoice() {
+                    KeyboardDialog.this.cancelVoice();
+                    if (!closed) status.setText("本次语音已取消，原文字保留");
+                }
+                public void clearText() { KeyboardDialog.this.clearText(); }
+            }, x == null ? 640 : x.getRange(), y == null ? 480 : y.getRange());
+        }
+        long signature = event.getDownTime(); signature = signature * 31 + event.getEventTime(); signature = signature * 31 + event.getAction();
+        for (int i = 0; i < event.getPointerCount(); i++) {
+            signature = signature * 31 + event.getPointerId(i);
+            signature = signature * 31 + Float.floatToIntBits(event.getX(i)); signature = signature * 31 + Float.floatToIntBits(event.getY(i));
+        }
+        if (haveEvent && signature == lastEventSignature) return lastConsumed;
+        haveEvent = true; lastEventSignature = signature;
+        lastConsumed = gestures.event(event);
+        if (lastConsumed) lastMultiTime = android.os.SystemClock.uptimeMillis();
+        return lastConsumed;
+    }
+    boolean physicalKey(android.view.KeyEvent event) {
+        if (closed || !isShowing() || !getWindow().getDecorView().hasWindowFocus() || event == null) return false;
+        InputDevice device = event.getDevice();
+        if (device == null || !"cyttsp5_mt".equals(device.getName())) return false;
+        int code = event.getKeyCode();
+        if (code != android.view.KeyEvent.KEYCODE_MEDIA_NEXT && code != android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS) return false;
+        return gestures != null && (gestures.ownsContacts() || (lastMultiTime != Long.MIN_VALUE && android.os.SystemClock.uptimeMillis() - lastMultiTime <= 250));
+    }
+    @Override public boolean dispatchTouchEvent(MotionEvent event) { return physicalMotion(event) || super.dispatchTouchEvent(event); }
+    @Override public boolean dispatchGenericMotionEvent(MotionEvent event) { return physicalMotion(event) || super.dispatchGenericMotionEvent(event); }
+    @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) { return physicalKey(event) || super.dispatchKeyEvent(event); }
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
-        if (!focused && voice != null) { voice.cancel(); if (voiceButton != null) voiceButton.setText("语音"); }
+        if (!focused) { if (gestures != null) gestures.cancel(); cancelVoice(); }
     }
     @Override public void dismiss() {
         if (!closed) {
             closed = true;
+            if (gestures != null) gestures.cancel();
+            cancelVoice(); pinyinGeneration++;
             target.observe(null);
             if (pinyin != null) pinyin.close();
-            if (voice != null) voice.cancel();
             View owner = target.owner(); if (owner != null) owner.removeOnAttachStateChangeListener(this);
         }
         super.dismiss();

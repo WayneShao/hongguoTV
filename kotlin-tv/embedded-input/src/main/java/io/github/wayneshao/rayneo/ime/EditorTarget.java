@@ -12,6 +12,7 @@ public interface EditorTarget {
     String preview();
     void commit(String text);
     void delete();
+    void clear();
     void move(int direction);
     void submit();
     default void observe(Runnable changed) { }

@@ -34,7 +34,7 @@ object SearchKeyboard {
     private fun open(editor: EditText) {
         editor.requestFocus()
         val shown = EmbeddedInput.show(NativeEditor(editor)) { dialog, _ ->
-            dialog.window?.let(RayNeoInput::install) // Module already owns stereo rendering.
+            RayNeoInput.installKeyboard(dialog) // Module owns stereo and gets first refusal on two fingers.
         }
         Log.i("EmbeddedSearchInput", "open shown=$shown")
     }

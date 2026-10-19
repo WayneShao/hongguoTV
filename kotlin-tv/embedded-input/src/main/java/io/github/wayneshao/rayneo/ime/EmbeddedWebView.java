@@ -35,10 +35,12 @@ public class EmbeddedWebView extends WebView {
                 + "var s=window.getSelection();range=node.isContentEditable&&s.rangeCount?s.getRangeAt(0).cloneRange():null;bridge.open(JSON.stringify(data()));}"
                 + "function mutate(id,op,value){if(id!==serial||!target||!target.isConnected)return null;"
                 + "if(op==='submit'){target.dispatchEvent(new Event('change',{bubbles:true}));target.blur();return data();}"
+                + "if(op==='clear'&&target.isContentEditable){var s=window.getSelection(),r=document.createRange();r.selectNodeContents(target);s.removeAllRanges();s.addRange(r);document.execCommand('delete',false,null);if(s.rangeCount)range=s.getRangeAt(0).cloneRange();return data();}"
                 + "if(target.isContentEditable){var s=window.getSelection();if(range){s.removeAllRanges();s.addRange(range);}"
                 + "if(op==='insert')document.execCommand('insertText',false,value);else if(op==='delete')document.execCommand('delete',false,null);"
                 + "else s.modify('move',op==='left'?'backward':'forward','character');if(s.rangeCount)range=s.getRangeAt(0).cloneRange();return data();}"
                 + "var old=target.value,a=target.selectionStart,b=target.selectionEnd;if(a===null){a=old.length;b=a;}"
+                + "if(op==='clear'){a=0;b=old.length;}"
                 + "if(op==='left'||op==='right'){var p=b;if(op==='left'&&p>0)p-=p>1&&/[\\uDC00-\\uDFFF]/.test(old[p-1])?2:1;"
                 + "if(op==='right'&&p<old.length)p+=old.codePointAt(p)>65535?2:1;try{target.setSelectionRange(p,p);}catch(e){}return data();}"
                 + "if(op==='delete'&&a===b&&a>0)a-=a>1&&/[\\uDC00-\\uDFFF]/.test(old[a-1])?2:1;"
@@ -46,7 +48,7 @@ public class EmbeddedWebView extends WebView {
                 + "var proto=target.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;"
                 + "Object.getOwnPropertyDescriptor(proto,'value').set.call(target,old.slice(0,a)+insert+old.slice(b));"
                 + "try{target.setSelectionRange(a+insert.length,a+insert.length);}catch(e){}"
-                + "target.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:op==='delete'?'deleteContentBackward':'insertText',data:insert}));return data();}"
+                + "target.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:op==='delete'||op==='clear'?'deleteContentBackward':'insertText',data:insert}));return data();}"
                 + "document.querySelectorAll('input,textarea,[contenteditable]').forEach(quiet);"
                 + "var observer=new MutationObserver(function(){document.querySelectorAll('input,textarea,[contenteditable]').forEach(function(e){if(e.getAttribute('inputmode')!=='none')quiet(e);});});"
                 + "observer.observe(document.documentElement,{childList:true,subtree:true});"
@@ -86,6 +88,7 @@ public class EmbeddedWebView extends WebView {
         public void observe(Runnable callback) { changed = callback; }
         public void commit(String text) { edit("insert", text); }
         public void delete() { edit("delete", ""); }
+        public void clear() { edit("clear", ""); }
         public void move(int direction) { edit(direction < 0 ? "left" : "right", ""); }
         public void submit() { edit("submit", ""); }
         void edit(String operation, String text) {

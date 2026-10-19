@@ -51,6 +51,11 @@ public final class NativeEditor implements EditorTarget {
         if (a != b) text.delete(Math.min(a, b), Math.max(a, b));
         else if (a > 0) text.delete(Character.offsetByCodePoints(text, a, -1), a);
     }
+    public void clear() {
+        EditText e = reference.get(); if (e == null) return;
+        e.getText().clear();
+        Selection.setSelection(e.getText(), 0);
+    }
     public void move(int direction) {
         EditText e = reference.get(); if (e == null) return;
         Editable text = e.getText(); int cursor = clamp(e.getSelectionEnd(), text.length());

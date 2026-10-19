@@ -12,6 +12,12 @@ import java.lang.ref.WeakReference
 
 /** Each activity/dialog retains its own callback, gesture lifetime and focus. */
 object RayNeoInput {
+    /** Only the embedded keyboard supplies this owner; ordinary windows keep MENU. */
+    fun installKeyboard(dialog: android.app.Dialog) {
+        val window = dialog.window ?: return
+        val original = window.callback ?: return
+        if (original !is InputCallback) window.callback = InputCallback(window, original, dialog)
+    }
     private var tracing = false
     private val traces = java.util.ArrayDeque<String>()
     @androidx.annotation.VisibleForTesting
@@ -31,7 +37,7 @@ object RayNeoInput {
         if (original !is InputCallback) window.callback = InputCallback(window, original)
     }
 
-    private class InputCallback(val window: Window, val original: Window.Callback) : Window.Callback by original {
+    private class InputCallback(val window: Window, val original: Window.Callback, val keyboard: android.app.Dialog? = null) : Window.Callback by original {
         private val root = window.decorView
         private val handler = Handler(Looper.getMainLooper())
         // The glasses' framework touch slop is 65 px, unsuitable for short temple swipes.
@@ -123,6 +129,9 @@ object RayNeoInput {
             if (hasFocus) requestRecovery()
         }
         override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+            if (keyboard != null && io.github.wayneshao.rayneo.ime.EmbeddedInput.key(keyboard, event)) {
+                cancel(); return true
+            }
             if (GestureCore.source(event.device?.name) < 0) return true
             // Native DPAD/mouse behavior remains authoritative and invalidates a delayed tap.
             cancel()
@@ -135,6 +144,9 @@ object RayNeoInput {
         override fun dispatchGenericMotionEvent(event: MotionEvent) = motion(event) || original.dispatchGenericMotionEvent(event)
 
         private fun motion(e: MotionEvent): Boolean {
+            if (keyboard != null && io.github.wayneshao.rayneo.ime.EmbeddedInput.motion(keyboard, e)) {
+                cancel(); return true
+            }
             val source = GestureCore.source(e.device?.name)
             trace("motion action=${e.actionMasked} source=$source device=${e.deviceId} xy=${e.x},${e.y} time=${e.eventTime} count=${e.pointerCount} touching=$touching focus=${root.findFocus()?.javaClass?.simpleName} windowFocus=${root.hasWindowFocus()} attached=${root.isAttachedToWindow}")
             if (source == 0) { cancel(); return false }
