@@ -49,6 +49,8 @@ object RayNeoInput {
         private val gestures = GestureCore(slop,
             ViewConfiguration.getDoubleTapTimeout().toLong(), ViewConfiguration.getLongPressTimeout().toLong())
         private val twoFinger = TwoFingerTap(slop, ViewConfiguration.getLongPressTimeout().toLong())
+        // BACK belongs to the window, not to a focusable button that touch mode can clear.
+        private val windowTaps = GestureCore(slop, ViewConfiguration.getDoubleTapTimeout().toLong(), ViewConfiguration.getLongPressTimeout().toLong())
         private var pairTarget: Target? = null
         private var delivery: Runnable? = null
         private var deliveryTarget: Target? = null
@@ -60,11 +62,7 @@ object RayNeoInput {
         private var recoveryQueued = false
         private var recoveryDeadline = 0L
         private val focusListener = ViewTreeObserver.OnGlobalFocusChangeListener { old, next ->
-            // Android enters touch mode before delivering the second temple DOWN.
-            // Native buttons lose focus transiently; this is not a new edit target.
-            val touchModeLoss = next == null && root.isInTouchMode &&
-                target?.focus === old && old != null && inside(old)
-            if (target != null && target?.focus !== next && !touchModeLoss) cancel()
+            if (target != null && target?.focus !== next) cancel()
             remember(old); remember(next)
             requestRecovery()
         }
@@ -129,14 +127,16 @@ object RayNeoInput {
         }
         private fun stopRecovery() { root.removeCallbacks(recovery); recoveryQueued = false }
         override fun onContentChanged() {
+            windowTaps.cancel()
             cancel(); previous.clear(); regions = emptyList(); original.onContentChanged(); requestRecovery()
         }
         override fun onWindowFocusChanged(hasFocus: Boolean) {
-            if (!hasFocus) { cancel(); stopRecovery() }
+            if (!hasFocus) { windowTaps.cancel(); cancel(); stopRecovery() }
             original.onWindowFocusChanged(hasFocus)
             if (hasFocus) requestRecovery()
         }
         override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+            windowTaps.cancel()
             trace("incoming key=${event.keyCode} action=${event.action} device=${event.device?.name}")
             if (keyboard != null && io.github.wayneshao.rayneo.ime.EmbeddedInput.key(keyboard, event)) {
                 cancel(); return true
@@ -159,18 +159,33 @@ object RayNeoInput {
 
         private fun motion(e: MotionEvent): Boolean {
             if (keyboard != null && io.github.wayneshao.rayneo.ime.EmbeddedInput.motion(keyboard, e)) {
+                windowTaps.cancel()
                 trace("module consumed action=${e.actionMasked} count=${e.pointerCount}")
                 cancel(); return true
             }
             val source = GestureCore.source(e.device?.name)
             trace("motion action=${e.actionMasked} source=$source device=${e.deviceId} xy=${e.x},${e.y} time=${e.eventTime} count=${e.pointerCount} touching=$touching focus=${root.findFocus()?.javaClass?.simpleName} windowFocus=${root.hasWindowFocus()} attached=${root.isAttachedToWindow}")
-            if (source == 0) { cancel(); return false }
+            if (source == 0) { windowTaps.cancel(); cancel(); return false }
             if (source < 0) return true
             if (!root.hasWindowFocus() || !root.isAttachedToWindow) { cancel(); return true }
-            if (lastDevice != e.deviceId) { cancel(); lastDevice = e.deviceId }
+            if (lastDevice != e.deviceId) { windowTaps.cancel(); cancel(); lastDevice = e.deviceId }
             if (lastTime == e.eventTime && lastAction == e.actionMasked) return true
             lastTime = e.eventTime; lastAction = e.actionMasked
             val action = e.actionMasked
+            if (e.pointerCount != 1 || action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_POINTER_UP) {
+                windowTaps.cancel()
+            } else when (action) {
+                MotionEvent.ACTION_DOWN -> windowTaps.down(e.x, e.y, e.eventTime)
+                MotionEvent.ACTION_MOVE -> {
+                    for (h in 0 until e.historySize) windowTaps.move(e.getHistoricalX(h), e.getHistoricalY(h))
+                    windowTaps.move(e.x, e.y)
+                }
+                MotionEvent.ACTION_UP -> if (windowTaps.up(e.x, e.y, e.eventTime) == GestureCore.Action.BACK) {
+                    trace("window double tap BACK")
+                    windowTaps.cancel(); cancel(); send(GestureCore.Action.BACK)
+                    return true
+                }
+            }
             if (action == MotionEvent.ACTION_DOWN) cancelDelivery()
             if (action in listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP, MotionEvent.ACTION_MOVE,
                     MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL)) {
@@ -197,10 +212,6 @@ object RayNeoInput {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_BUTTON_PRESS -> {
                     if (touching) return true
                     hover = false
-                    if (gestures.pending() && root.findFocus() == null) {
-                        prepare()
-                        if (target?.valid() != true) cancel()
-                    }
                     // An expired single tap is delivered before capturing a new target.
                     if (gestures.pending()) {
                         val expired = gestures.confirm(e.eventTime)

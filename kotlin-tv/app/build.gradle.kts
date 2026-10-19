@@ -32,6 +32,7 @@ android {
 dependencies {
     implementation(project(":embedded-input"))
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.12.2")
     implementation("androidx.core:core:1.8.0")
     implementation("com.google.zxing:core:3.5.3")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
@@ -39,4 +40,11 @@ dependencies {
     implementation(project(":core")) { exclude(group = "org.json") }
     implementation("androidx.media3:media3-exoplayer:1.8.0")
     implementation("androidx.media3:media3-ui:1.8.0")
+}
+tasks.withType<Test>().configureEach {
+    systemProperty("java.io.tmpdir", System.getProperty("java.io.tmpdir"))
+    System.getenv("RAYNEO_ROBOLECTRIC_SDK")?.let {
+        systemProperty("robolectric.offline", "true")
+        systemProperty("robolectric.dependency.dir", it)
+    }
 }
