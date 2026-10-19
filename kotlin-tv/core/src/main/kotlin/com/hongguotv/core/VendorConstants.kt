@@ -1,7 +1,7 @@
 // Derived from drpys 22261ad; GPL-3.0. See kotlin-tv/NOTICE.md.
 package com.hongguotv.core
 
-internal object VendorConstants {
+object VendorConstants {
     const val VIDEO_UA = "com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
     const val APP_UA = "com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)"
     val device = linkedMapOf(
