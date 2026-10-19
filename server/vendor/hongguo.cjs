@@ -33,10 +33,15 @@ const DEVICE = {
     update_version_code: '71332', host_abi: 'arm64-v8a', dragon_device_type: 'phone', pv_player: '71332',
     compliance_status: '0', need_personal_recommend: '1', player_so_load: '1', is_android_pad_screen: '0',
 };
+Object.assign(DEVICE, globalThis.HONGGUO_DEVICE || {});
 const APP_DEVICE = {
     ...DEVICE, version_code: '72232', version_name: '7.2.2.32', manifest_version_code: '72232',
     update_version_code: '72232', pv_player: '72232',
 };
+function setDeviceIdentity(identity) {
+    Object.assign(DEVICE, identity);
+    Object.assign(APP_DEVICE, identity);
+}
 const SELECTOR_GROUPS = [
     { key: 'background', name: '全部背景', items: [['现代', 'cate_757'], ['都市', 'cate_1'], ['古代', 'cate_758'], ['乡村', 'cate_11'], ['年代', 'cate_79'], ['架空', 'cate_452'], ['职场', 'cate_127'], ['民国', 'cate_390'], ['校园', 'cate_4'], ['宫廷', 'cate_1153'], ['荒岛', 'cate_1162']] },
     { key: 'topic', name: '全部主题', items: [['现言', 'cate_1021'], ['女性成长', 'cate_1048'], ['脑洞', 'cate_262'], ['奇幻', 'cate_1020'], ['玄幻', 'cate_1019'], ['古言', 'cate_439'], ['战神', 'cate_1038'], ['宫斗', 'cate_246'], ['仙侠', 'cate_1013'], ['权谋', 'cate_1047'], ['种田', 'cate_1180'], ['年代爱情', 'cate_1022'], ['悬疑', 'cate_165'], ['喜剧', 'cate_303'], ['青春', 'cate_297'], ['志怪', 'cate_1027'], ['民国爱情', 'cate_1025'], ['灵异', 'cate_751'], ['家国情怀', 'cate_1235'], ['法律', 'cate_1136'], ['刑侦', 'cate_1148'], ['抗战', 'cate_504'], ['武侠', 'cate_1172'], ['民国传奇', 'cate_1240'], ['动作', 'cate_302'], ['求生', 'cate_1168'], ['科幻', 'cate_1092'], ['恐怖', 'cate_1219'], ['商战', 'cate_1225']] },
