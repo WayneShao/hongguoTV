@@ -1,9 +1,34 @@
 import fs from "node:fs";
+import path from "node:path";
 import vm from "node:vm";
 import crypto from "node:crypto";
 import axios from "axios";
 
 // Trusted, pinned GPL source. This is a compatibility wrapper, not a sandbox for user scripts.
+function validDevice(value) {
+  return typeof value === "string" && /^[1-9][0-9]{15}$/.test(value);
+}
+function nextDeviceId() {
+  const bytes = crypto.randomBytes(7);
+  return (BigInt(`0x${bytes.toString("hex")}`) % 9000000000000000n + 1000000000000000n).toString();
+}
+function loadDeviceIdentity() {
+  const file = process.env.HONGGUOTV_DEVICE_FILE || path.join(process.env.XDG_STATE_HOME || process.cwd(), ".hongguotv-device.json");
+  try {
+    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (validDevice(saved.iid) && validDevice(saved.device_id)) return { iid: saved.iid, device_id: saved.device_id };
+  } catch {}
+  const identity = { iid: nextDeviceId(), device_id: nextDeviceId() };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, file);
+  } catch {}
+  return identity;
+}
+let deviceIdentity = loadDeviceIdentity();
+
 const source = fs.readFileSync(
   new URL("./vendor/hongguo.cjs", import.meta.url),
   "utf8"
@@ -15,6 +40,7 @@ const context = vm.createContext({
   },
   Buffer,
   URL,
+  HONGGUO_DEVICE: deviceIdentity,
   URLSearchParams,
   axios: axios.create({
     maxContentLength: 16 * 1024 * 1024,
@@ -23,11 +49,42 @@ const context = vm.createContext({
 });
 vm.runInContext(
   source +
-    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache};",
+    "\nthis.api = {categoryPage, categoryData, itemToCard, appSearchPage, routerData, resolveStream, prepareHeader, remoteRange, decryptPartial, streamCache, videoInfoCache, pageCache, appSearchCache, setDeviceIdentity};",
   context,
   { timeout: 5000 }
 );
 const api = context.api;
+function identityRisk(error) {
+  const text = String(error?.message || error || "");
+  return /(?:HTTP\s+(?:401|403)|(?:device[_ -]?id|iid).*(?:risk|ban|block|blacklist|invalid|reject|forbidden)|blacklist|风控|设备标识)/i.test(text);
+}
+function saveDeviceIdentity(identity) {
+  const file = process.env.HONGGUOTV_DEVICE_FILE || path.join(process.env.XDG_STATE_HOME || process.cwd(), ".hongguotv-device.json");
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, file);
+  } catch {}
+}
+async function withIdentityRecovery(operation) {
+  try { return await operation(); } catch (error) {
+    if (!identityRisk(error)) throw error;
+    const previous = { ...deviceIdentity };
+    const candidate = newDeviceIdentity();
+    Object.assign(deviceIdentity, candidate);
+    api.setDeviceIdentity(candidate);
+    try {
+      const result = await operation();
+      saveDeviceIdentity(candidate);
+      return result;
+    } catch (retryError) {
+      Object.assign(deviceIdentity, previous);
+      api.setDeviceIdentity(previous);
+      throw retryError;
+    }
+  }
+}
 const SITE = "https://hongguoduanju.com";
 const card = (row) => ({
   id: String(row.url),
@@ -52,10 +109,14 @@ export const provider = {
     return { items: cards(pageData.recommendList.map(api.itemToCard)), page };
   },
   async search(keyword, page = 1) {
+    return withIdentityRecovery(() => this.searchOnce(keyword, page));
+  },
+  async searchOnce(keyword, page = 1) {
     try {
       const result = await api.appSearchPage(keyword, 11, page, 20);
       if (result.list.length) return { items: cards(result.list), page };
-    } catch {
+    } catch (error) {
+      if (identityRisk(error)) throw error;
       /* Website fallback; failure below remains an error, never an empty success. */
     }
     const data = await api.routerData(
@@ -85,6 +146,9 @@ export const provider = {
     return { ...card(api.itemToCard(series)), id, episodes };
   },
   async stream(id, fresh = false) {
+    return withIdentityRecovery(() => this.streamOnce(id, fresh));
+  },
+  async streamOnce(id, fresh = false) {
     if (fresh) {
       api.streamCache.delete(`${id}|auto`);
       api.videoInfoCache.delete(id);

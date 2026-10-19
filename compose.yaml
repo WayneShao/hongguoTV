@@ -7,9 +7,12 @@ services:
       BRIDGE_HOST: 0.0.0.0
       PORT: 8787
       BRIDGE_TOKEN: ${BRIDGE_TOKEN:-}
+      HONGGUOTV_DEVICE_FILE: /state/device.json
     restart: unless-stopped
     init: true
     read_only: true
+    volumes:
+      - "${HONGGUOTV_STATE_DIR:-./.state}:/state"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     logging:

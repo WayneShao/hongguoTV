@@ -31,7 +31,7 @@ class MainActivity: Activity() {
     private val accent=TvStyle.accent; private val white=TvStyle.text; private val muted=TvStyle.muted
     private val main=Handler(Looper.getMainLooper())
     private val io=Executors.newFixedThreadPool(3)
-    private val repository=ContentRepository()
+    private val repository=ContentRepository(prepareIdentityRetry = DeviceIdentity::prepareRotation, commitIdentityRetry = DeviceIdentity::commitRotation, rollbackIdentityRetry = DeviceIdentity::rollbackRotation)
     private val networkCleanup=Executors.newSingleThreadExecutor()
     private val prefetchWorker=Executors.newSingleThreadExecutor()
     private var prefetchHttp: okhttp3.OkHttpClient?=null
@@ -192,6 +192,7 @@ class MainActivity: Activity() {
     }
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
+        DeviceIdentity.configure(this)
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
@@ -919,7 +920,7 @@ class MainActivity: Activity() {
         cancelPrefetch(); prefetchedFor=key; prefetchAttemptAt=now; prefetchAttempts++
         val ticket=preparedNext.begin(key)
         val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).build()
-        val source=ContentRepository(http); prefetchHttp=http
+        val source=ContentRepository(http, prepareIdentityRetry = DeviceIdentity::prepareRotation, commitIdentityRetry = DeviceIdentity::commitRotation, rollbackIdentityRetry = DeviceIdentity::rollbackRotation); prefetchHttp=http
         val scope=RequestScope(); prefetchScope=scope
         prefetchJob=prefetchWorker.submit {
             var remote: RemoteVideo?=null
