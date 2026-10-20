@@ -165,6 +165,34 @@ internal class Signer(private val clock: () -> Long = System::currentTimeMillis,
         }
         error("无法生成请求签名")
     }
+    fun signSimple(base: String, values: Map<String,String>, body: ByteArray): Request {
+        val now = clock(); val ts = (now / 1000).toInt()
+        val query = encode(values + mapOf("_rticket" to now.toString()))
+        val headers = linkedMapOf(
+            "User-Agent" to VendorConstants.VIDEO_UA,
+            "Accept" to "application/json",
+            "x-xs-from-web" to "0",
+            "sdk-version" to "2",
+            "x-khronos" to ts.toString(),
+            "x-gorgon" to legacyGorgon(query,body,ts),
+            "x-ss-req-ticket" to now.toString(),
+            "Content-Type" to "application/json; charset=UTF-8",
+            "x-ss-stub" to digest("MD5",body).hex().uppercase()
+        )
+        return Request("$base?$query",headers,body)
+    }
+    private fun legacyGorgon(query: String, body: ByteArray, ts: Int): String {
+        val input = digest("MD5",query.toByteArray()).copyOf(4) + digest("MD5",body).copyOf(4) + ByteArray(4) + byteArrayOf(0,6,11,28) + be32(ts)
+        val key = byteArrayOf(0x44,0xb9.toByte(),0xb9.toByte(),0xd9.toByte(),0xa4.toByte(),0xae.toByte(),0xf9.toByte(),0xfc.toByte(),0xa4.toByte(),0x93.toByte(),0xaa.toByte(),0x75,0x7c,0xa3.toByte(),0xc2.toByte(),0xc4.toByte(),0xa4.toByte(),0x96.toByte(),0x93.toByte(),0x8f.toByte())
+        val out = ByteArray(20) { i -> (input[i].u() xor key[i].u()).toByte() }
+        for (i in out.indices) {
+            val value = ((out[i].u() shr 4) or (out[i].u() shl 4)) and 255
+            val next = out[(i+1)%20].u()
+            val reversed = Integer.reverse((next xor value) and 255) ushr 24
+            out[i] = (reversed xor 20).inv().toByte()
+        }
+        return (hex("8404401c0000")+out).hex()
+    }
     companion object {
         fun encode(values: Map<String,String>) = values.entries.joinToString("&") { (k,v) -> "${encode(k)}=${encode(v)}" }
         fun encode(value: String): String = URLEncoder.encode(value,"UTF-8").replace("+","%20").replace("%7E","~")

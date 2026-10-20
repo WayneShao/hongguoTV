@@ -12,6 +12,55 @@ import org.junit.Test
 import java.io.IOException
 
 class ContentRepositoryTest {
+    @Test fun preloadUsesPersistedIdentityAndMinimalHeaders() {
+        val repo=repository { request ->
+            if(request.url.host=="example.com") """{"video_info":{"data":{"video_list":{"v0":{"vheight":480,"codec_type":"h264","main_url":"https://example.com/a.mp4"}}}}}"""
+            else {
+                assertEquals("/novel/player/multi_video_model/preload/v1/",request.url.encodedPath)
+                assertEquals(VendorConstants.device["device_id"],request.url.queryParameter("device_id"))
+                assertEquals(VendorConstants.device["iid"],request.url.queryParameter("iid"))
+                assertEquals("73532",request.url.queryParameter("version_code"))
+                assertNull(request.url.queryParameter("ts"))
+                assertTrue(request.header("x-gorgon")!!.startsWith("8404401c0000"))
+                for(name in listOf("x-ladon","x-argus","x-medusa","x-helios")) assertNull(request.header(name))
+                val body=okio.Buffer(); request.body!!.writeTo(body)
+                val payload=JSONObject(body.readUtf8())
+                assertEquals(1024,payload.getJSONObject("biz_param").getInt("video_platform"))
+                assertTrue(payload.getJSONObject("biz_param").getBoolean("need_all_video_definition"))
+                assertEquals("123",payload.getJSONObject("mixed_video_id_map").getJSONArray("1004").getString(0))
+                """{"data":{"123":{"video_model":{"fallback_api":"https://example.com/stream"}}}}"""
+            }
+        }
+        assertEquals("480P",repo.stream("123",480).quality)
+    }
+    @Test fun emptyBodyDoesNotMasqueradeAsDeviceRejection() {
+        val e=assertThrows(IOException::class.java) { repository { "" }.stream("123") }
+        assertEquals("播放接口未返回有效数据，请稍后再试",e.message)
+        assertFalse(e is DeviceIdentityRejectedException)
+    }
+    @Test fun wrongEpisodeIsNeverUsedAsFallback() {
+        assertThrows(IOException::class.java) {
+            repository { """{"data":{"456":{"video_model":{"fallback_api":"https://example.com/wrong"}}}}""" }.stream("123")
+        }
+    }
+    @Test fun candidateSuccessCommitsAndFailureRollsBack() {
+        for(success in listOf(true,false)) {
+            val events=mutableListOf<String>(); var calls=0
+            val http=OkHttpClient.Builder().addInterceptor { chain ->
+                calls++
+                val body=when {
+                    calls==1 -> """{"code":1,"message":"device_id rejected"}"""
+                    !success -> ""
+                    calls==2 -> """{"data":{"123":{"video_model":{"fallback_api":"https://example.com/stream"}}}}"""
+                    else -> """{"video_info":{"data":{"video_list":{"v0":{"vheight":480,"main_url":"https://example.com/a.mp4"}}}}}"""
+                }
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK").body(body.toResponseBody()).build()
+            }.build()
+            val repo=ContentRepository(http, prepareIdentityRetry={events+="prepare"},commitIdentityRetry={events+="commit"},rollbackIdentityRetry={events+="rollback"})
+            if(success) repo.stream("123",480) else assertThrows(IOException::class.java) { repo.stream("123",480) }
+            assertEquals(listOf("prepare",if(success) "commit" else "rollback"),events)
+        }
+    }
     private fun streamRepository(vararg variants: Triple<Int,String,String>) = repository { request ->
         if(request.url.host=="example.com") {
             val rows=JSONObject()

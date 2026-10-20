@@ -156,15 +156,27 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private fun streamOnce(id: String, maxQuality: Int): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
         val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/",VendorConstants.device,payload)
-        val data=JSONObject(text(signed.url,signed))
+        val values=linkedMapOf(
+            "aid" to "8662","app_name" to "novelread",
+            "version_code" to "73532","version_name" to "7.3.5.32",
+            "manifest_version_code" to "73532","update_version_code" to "73532",
+            "channel" to "update_64","device_platform" to "android","os" to "android",
+            "ssmix" to "a","device_type" to "25053RT47C","device_brand" to "Redmi",
+            "language" to "zh","os_api" to "36","os_version" to "16",
+            "resolution" to "1280*2772","dpi" to "520","ac" to "wifi",
+            "device_id" to VendorConstants.device.getValue("device_id"),"iid" to VendorConstants.device.getValue("iid")
+        )
+        val signed=signer.signSimple("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/",values,payload)
+        val resp=text(signed.url,signed)
+        if(resp.isBlank()) throw IOException("播放接口未返回有效数据，请稍后再试")
+        val data=JSONObject(resp)
         if(data.optInt("Code",data.optInt("code",0))!=0) {
             val message = data.str("Message").ifEmpty { data.str("message") }.ifEmpty { data.str("msg") }
             if (isIdentityRisk(200, message)) throw DeviceIdentityRejectedException("播放接口拒绝设备标识")
             throw IOException("播放接口暂不可用")
         }
         val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val entry=map.optJSONObject(id) ?: map.keys().asSequence().mapNotNull { map.optJSONObject(it) }.firstOrNull() ?: throw IOException("播放信息为空")
+        val entry=map.optJSONObject(id) ?: throw IOException("播放信息为空")
         val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
         val raw=model.opt("fallback_api")
         val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
