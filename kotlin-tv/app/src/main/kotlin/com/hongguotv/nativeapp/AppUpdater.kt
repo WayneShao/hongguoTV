@@ -64,12 +64,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         }
     }
     fun resume() {
-        active = true; main.removeCallbacks(poll); main.postDelayed(poll, 8000)
-        if (permissionRequested) {
-            permissionRequested = false
-            if (activity.packageManager.canRequestPackageInstalls()) install()
-            else { status = "安装权限未开启，可在这里再次安装"; show(anchor) }
-        }
+        active = true // Personal build: only install our own signed updates.
     }
     fun pause() {
         active = false; main.removeCallbacks(poll); interrupt()
@@ -94,39 +89,14 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     }
     fun show(from: View?) {
         if (!active) return
-        anchor = from
         dialog?.dismiss()
-        val dp = activity.resources.displayMetrics.density
-        val body = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL; setPadding((24*dp).toInt(), (12*dp).toInt(), (24*dp).toInt(), 0) }
-        statusView = TextView(activity).apply { text = status; textSize = 17f; setTextColor(TvStyle.text) }
-        body.addView(statusView)
-        body.addView(CheckBox(activity).apply {
-            text = "自动检查并下载更新"; isChecked = auto
-            setOnCheckedChangeListener { _, enabled ->
-                preferences.edit().putBoolean("automatic", enabled).apply()
-                if (!enabled && busy) { interrupt(); updateStatus("自动更新已关闭，可手动检查"); renderActions() }
-            }
-        })
-        body.addView(TextView(activity).apply {
-            text = "只在应用前台浏览时检查，播放中不打扰。下载后需确认系统安装，收藏与观看记录保留。"; textSize = 13f; setTextColor(TvStyle.muted)
-            setPadding(0, (8*dp).toInt(), 0, (8*dp).toInt())
-        })
-        val next = AlertDialog.Builder(activity).setTitle("版本与更新 · ${BuildConfig.VERSION_NAME}").setView(ScrollView(activity).apply { addView(body) })
-            .setNegativeButton("稍后", null).setPositiveButton("检查更新", null).create()
-        dialog = next
-        next.setOnDismissListener {
-            if (dialog === next) { dialog = null; statusView = null }
-            if (from?.isAttachedToWindow == true) from.requestFocus()
-        }
-        next.show()
-        next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { when { ready -> install(); available != null -> download(true); else -> check(true) } }
-        next.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-            available?.let { preferences.edit().putLong("deferred_code", it.versionCode).putLong("deferred_until", System.currentTimeMillis()+24*60*60*1000L).apply() }
-            next.dismiss()
-        }
-        renderActions()
-        next.getButton(AlertDialog.BUTTON_POSITIVE).post { if (dialog === next) next.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus() }
+        dialog = AlertDialog.Builder(activity)
+            .setTitle("版本与更新 · ${BuildConfig.VERSION_NAME}")
+            .setMessage("此版本由 WayneShao/hongguoTV 独立维护，请使用相同签名的个人构建覆盖升级，保留本机记录。")
+            .setPositiveButton("确定", null).create()
+        dialog?.show()
     }
+
     private fun <T> work(action: () -> T, done: (T) -> Unit) {
         busy = true; renderActions(); val ticket = ++generation
         task = worker.submit {
