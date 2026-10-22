@@ -12,35 +12,25 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 
-/** Holds one registered upstream device, mirroring fqapp's pool rotation with a
- * single device plus re-registration whenever upstream rejects the signature. */
+/** Reuse the last identity, probe one registered candidate only after rejection,
+ * and publish it only after the original operation succeeds. */
 internal class PlayerDeviceSource(
     private val http: OkHttpClient,
     private val registrar: DeviceRegistrar = DeviceRegistrar(),
     private val store: () -> PlayerDeviceStore? = { ContentRepository.deviceStore },
+    private val register: () -> PlayerDevice = { registrar.register(http) },
 ) {
-    @Volatile private var cached: PlayerDevice? = null
-    private var forceFresh = false
-
-    @Synchronized fun commit() {
-        cached?.let { store()?.save(it.toJson()) }
-        forceFresh = false
-    }
-
     @Synchronized
-    fun obtain(): PlayerDevice {
-        cached?.let { return it }
-        if (!forceFresh) store()?.load()?.let { stored -> PlayerDevice.fromJson(stored)?.let { cached = it; return it } }
-        val fresh = registrar.register(http)
-        cached = fresh
-        // Persist only after a successful stream resolution.
-        return fresh
-    }
-
-    @Synchronized
-    fun invalidate() {
-        cached = null
-        forceFresh = true
+    fun <T> recover(block: (PlayerDevice) -> T): T {
+        val saved = store()?.load()?.let(PlayerDevice::fromJson)
+        // Migration: first try the identity already used by the previous release.
+        val active = saved ?: PlayerDevice(VendorConstants.device.getValue("device_id"),
+            VendorConstants.device.getValue("iid"), "", "", "")
+        return try { block(active) } catch (rejected: DeviceRejectedException) {
+            val candidate = register()
+            // Candidate is local to this attempt: failure leaves memory and disk unchanged.
+            block(candidate).also { store()?.save(candidate.toJson()) }
+        }
     }
 
     companion object {

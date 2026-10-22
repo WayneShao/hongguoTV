@@ -153,19 +153,17 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        // The player endpoints reject the legacy embedded device id (error 110001),
-        // so resolve via freshly registered devices like fqapp does, re-registering
-        // once when upstream rejects the signature. The old fixed-device call
-        // stays as a last-resort fallback.
-        if (deviceStore != null) for (attempt in 0..1) {
-            try { return playerStream(id, maxQuality).also { devices.commit() } }
-            catch (e: DeviceRejectedException) { devices.invalidate() }
-            catch (e: Exception) { break }
+        if (deviceStore != null) {
+            try { return devices.recover { device -> playerStream(id, maxQuality, device) } }
+            catch (e: Exception) {
+                // Keep the previous protocol as a fallback, but do not start a second
+                // random-identity rotation after the registered candidate failed.
+                return streamOnce(id, maxQuality)
+            }
         }
         return runWithIdentityRecovery { streamOnce(id, maxQuality) }
     }
-    private fun playerStream(id: String, maxQuality: Int): StreamInfo {
-        val device = devices.obtain()
+    private fun playerStream(id: String, maxQuality: Int, device: PlayerDevice): StreamInfo {
         val rows = mutableListOf<PlayerVariant>()
         var rejected = false
         var sawResponse = false
