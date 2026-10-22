@@ -87,6 +87,7 @@ final class KeyboardDialog extends Dialog implements View.OnAttachStateChangeLis
         modeButton = button(controls, "英文", () -> changeMode(false), 1);
         button(controls, "123 / 符号", () -> changeMode(true), 1.6f);
         voiceButton = button(controls, "语音", this::voice, 1);
+        if (!BuildConfig.VOICE_ENABLED) voiceButton.setVisibility(View.GONE);
         button(controls, "收起", this::cancelEditing, 1);
         button(controls, "完成 / 搜索", this::submit, 1.8f);
         setContentView(surface);
@@ -177,6 +178,7 @@ final class KeyboardDialog extends Dialog implements View.OnAttachStateChangeLis
         startVoice(false);
     }
     private boolean startVoice(final boolean holdToTalk) {
+        if (!BuildConfig.VOICE_ENABLED) { status.setText("此版本未包含语音输入"); return false; }
         if (voice != null && voice.active()) return false;
         if (waiting()) return false;
         if (target.password()) { status.setText("密码输入不启用语音"); return false; }

@@ -1,15 +1,25 @@
 plugins { id("com.android.library") }
+val voiceEnabled = providers.gradleProperty("embeddedVoice").orElse("true").get().toBoolean()
+val stageInput = tasks.register<Sync>("stageInputPayload") {
+    from("generated") { include("assets/**", "jniLibs/**")
+        if (!voiceEnabled) { exclude("assets/embedded-ime/voice/**", "jniLibs/**/libsherpa-onnx-jni.so") }
+    }
+    into(layout.buildDirectory.dir("input-payload"))
+}
 android {
     namespace = "io.github.wayneshao.rayneo.ime"
     compileSdk = 36
-    defaultConfig { minSdk = 26; consumerProguardFiles("consumer-rules.pro") }
+    buildFeatures { buildConfig = true }
+    defaultConfig { minSdk = 26; consumerProguardFiles("consumer-rules.pro"); buildConfigField("boolean", "VOICE_ENABLED", voiceEnabled.toString()) }
     sourceSets.getByName("main") {
         java.srcDir("generated/java")
-        assets.srcDir("generated/assets")
-        jniLibs.srcDir("generated/jniLibs")
+        assets.srcDir(layout.buildDirectory.dir("input-payload/assets"))
+        jniLibs.srcDir(layout.buildDirectory.dir("input-payload/jniLibs"))
+        if (!voiceEnabled) manifest.srcFile("src/noVoice/AndroidManifest.xml")
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
 }
+tasks.named("preBuild").configure { dependsOn(stageInput) }
 dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.12.2")
