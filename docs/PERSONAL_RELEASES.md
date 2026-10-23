@@ -37,3 +37,14 @@ The local keyboard adapter intentionally adds a VOICE_ENABLED build gate to the 
 For 0.9.3: TV versionCode 12; both glasses APKs versionCode 18. Verify manifest metadata, debuggable flag, certificates, native/assets contents and SHA-256 hashes before uploading. Publish all three APKs and SHA256SUMS.txt together. If the verified X3Pro is online, cover-install Full with `adb install -r --no-incremental`, preserving data; do not auto-launch or send input.
 
 Focused playback and recovery JVM tests pass. Android lint was omitted from local delivery builds because dependency retrieval had failed; physical temple gestures, voice and live playback remain separate device acceptance checks.
+
+## 0.9.4 unified search
+
+- Remove the search page category toggle, category-specific placeholder/history labels and dependence on the home category. Existing history is preserved and deduplicated for display. Home/catalog categories remain unchanged.
+- The former working tab (11) is the unified app search path; do not invoke the broken comic tab (19). Website JSON fallback returns its original cross-category results without local filtering.
+- Replace HTML `_ROUTER_DATA` search parsing with `/api/search/result`; validate page number and honor `hasMore`/`totalPages`. Keep pagination on the source chosen for page one.
+- Search registration uses aid 8662 and a separate `registered-search` preference store, not the playback aid 1967 identity. Reuse the existing identity first; explicit device rejection or an empty HTTP 200 may trigger one candidate probe. Empty content is not proof of a ban. Only a valid search response commits the candidate. Transport errors and malformed HTML do not register.
+- Registered candidates and old search cursors are never mixed. Identity changes require a fresh search session.
+- Protocol sources: tsukiyo-zero 2e9b7daf and wanwdbb 46babe6d (see NOTICE). No wholesale UI rewrite was imported.
+- Live JVM probe on 2026-10-23: old identity yielded an empty HTTP 200; candidate registration and search succeeded. 大佬 pages 1/2: 5/16 items, zero overlap; 修仙 pages 1/2: 17/17 items, zero overlap, reusing the candidate. No media playback or device UI was exercised. Direct website HTTPS probes failed during TLS handshake on this host; JSON fallback is covered by fixture tests, not claimed live-verified here.
+- TV versionCode 13, versionName 0.9.4-local; both RayNeo packages versionCode 19, versionNames 0.9.4-rayneo-keyboard / 0.9.4-rayneo-full. Existing signing keys and data are retained.
