@@ -1,6 +1,39 @@
 package com.hongguotv.core
 
 fun main(args: Array<String>) {
+    if (args.contains("--search-only")) {
+        val http=okhttp3.OkHttpClient.Builder().connectTimeout(10,java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS)
+            .addInterceptor { chain ->
+                val request=chain.request()
+                val response=chain.proceed(request)
+                println("searchProbe ${request.url.host}${request.url.encodedPath} http=${response.code}")
+                response
+            }.build()
+        ContentRepository.searchDeviceStore=object: PlayerDeviceStore {
+            var value: String?=null
+            override fun load()=value
+            override fun save(value: String?) { this.value=value; println("searchProbe candidate validated and committed") }
+        }
+        val repository=ContentRepository(http)
+        try {
+            for (keyword in listOf("大佬", "修仙")) {
+                val first=repository.search(keyword)
+                check(first.items.isNotEmpty()) { "No results for $keyword" }
+                println("searchProbe query=$keyword page=1 count=${first.items.size} more=${first.hasMore}")
+                if(first.hasMore) {
+                    val second=repository.search(keyword,2)
+                    val overlap=first.items.map { it.id }.intersect(second.items.map { it.id }.toSet()).size
+                    check(second.items.isNotEmpty() && overlap < second.items.size) { "Search page repeated or empty" }
+                    println("searchProbe query=$keyword page=2 count=${second.items.size} overlap=$overlap")
+                }
+            }
+        } finally {
+            ContentRepository.searchDeviceStore=null
+            http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     val repository=ContentRepository()
     if(args.contains("--ranking")) {
         try {
@@ -26,9 +59,9 @@ fun main(args: Array<String>) {
     }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
-    val search=repository.search(keyword,type=type); println("search=${search.items.size}; hasMore=${search.hasMore}")
+    val search=repository.search(keyword); println("search=${search.items.size}; hasMore=${search.hasMore}")
     if(type==ContentType.COMIC && search.hasMore) {
-        val next=repository.search(keyword,2,type)
+        val next=repository.search(keyword,2)
         println("searchPage2=${next.items.size}; overlap=${search.items.map { it.id }.intersect(next.items.map { it.id }.toSet()).size}")
     }
     val home=repository.home(type=type); println("type=${type.label}; home=${home.items.size}; hasMore=${home.hasMore}")

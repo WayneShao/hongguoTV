@@ -28,8 +28,11 @@ class DeviceIdentityRejectedException(message: String): IOException(message)
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, private val prepareIdentityRetry: (() -> Unit)? = null, private val commitIdentityRetry: (() -> Unit)? = null, private val rollbackIdentityRetry: (() -> Unit)? = null) {
     private val signer = Signer()
     private val devices = PlayerDeviceSource(http)
+    private val searchDevices = PlayerDeviceSource(http, store = { searchDeviceStore },
+        register = { SearchDeviceRegistrar(http, clock).register() })
+    private val websiteSearches = linkedMapOf<String, Long>()
     private val site = "https://hongguoduanju.com"
-    private data class SearchCursor(val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
+    private data class SearchCursor(val deviceId: String, val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
     private fun text(url: String, signed: Signer.Request? = null): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
@@ -75,19 +78,44 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
         return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
     }
-    fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
+    fun search(keyword: String, page: Int = 1): CatalogPage {
+        val type = ContentType.SHORT
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
-        // The website search does not constrain content type. Never use it for comics.
-        if(type==ContentType.COMIC) return appSearch(keyword,page,type)
-        try { val result=appSearch(keyword,page,type); if(result.items.isNotEmpty() || !result.hasMore) return result } catch (e: Exception) { if(e is SearchSessionExpiredException) throw e; /* Website fallback for short dramas only. */ }
-        val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
-        val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
+        val websitePaging = synchronized(websiteSearches) {
+            websiteSearches.entries.removeAll { clock()-it.value>300000 || (page==1 && it.key==keyword) }
+            websiteSearches.containsKey(keyword)
+        }
+        if (!websitePaging) {
+            try { return appSearch(keyword,page,type) }
+            catch (e: SearchSessionExpiredException) { throw e }
+            catch (e: Exception) { if (page > 1) throw IOException("搜索分页请求失败，请重试", e) }
+        }
+        val result = websiteSearch(keyword, page)
+        synchronized(websiteSearches) {
+            websiteSearches[keyword] = clock()
+            while (websiteSearches.size > 100) websiteSearches.remove(websiteSearches.keys.first())
+        }
+        return result
+    }
+    internal fun websiteSearch(keyword: String, page: Int): CatalogPage {
+        val raw=text("$site/api/search/result?query=${Signer.encode(keyword)}&page=$page")
+        val section=try { JSONObject(raw) } catch (e: Exception) { throw IOException("搜索响应格式已变化，请稍后重试",e) }
+        if(section.has("pageNum") && section.optInt("pageNum")!=page) throw IOException("搜索页码不匹配，请重新搜索")
         val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
         val items=valid(rows.objects().map(::card))
-        return CatalogPage(items,items.isNotEmpty() && page<100)
+        val more=when {
+            section.has("hasMore") -> section.optBoolean("hasMore",false)
+            section.has("totalPages") -> page < section.optInt("totalPages",page)
+            else -> false
+        }
+        return CatalogPage(items,more && page<100)
     }
     private fun appSearch(keyword: String, page: Int, type: ContentType): CatalogPage {
-        return runWithIdentityRecovery { appSearchOnce(keyword, page, type) }
+        if (searchDeviceStore == null) return runWithIdentityRecovery { appSearchOnce(keyword, page, type) }
+        return searchDevices.recover { device ->
+            try { appSearchOnce(keyword, page, type, device) }
+            catch (e: DeviceIdentityRejectedException) { throw DeviceRejectedException(e.message.orEmpty()) }
+        }
     }
     private fun <T> runWithIdentityRecovery(block: () -> T): T {
         return try { block() } catch (e: DeviceIdentityRejectedException) {
@@ -100,8 +128,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             }
         }
     }
-    private fun appSearchOnce(keyword: String, page: Int, type: ContentType): CatalogPage {
+    private fun appSearchOnce(keyword: String, page: Int, type: ContentType, device: PlayerDevice? = null): CatalogPage {
         val values=VendorConstants.device.toMutableMap()
+        device?.let { values["device_id"]=it.deviceId; values["iid"]=it.installId }
         for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) values[k]="72232"
         values["version_name"]="7.2.2.32"
         values.putAll(linkedMapOf("query" to keyword,"count" to "20","offset" to ((page-1)*20).toString(),"tab_type" to type.searchTab.toString(),"bookshelf_search_plan" to "4","use_correct" to "true","user_is_login" to "0"))
@@ -110,14 +139,18 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             searchCursors.entries.removeAll { now-it.value.updatedAt>300000 || (page==1 && it.key.first==type && it.key.second==keyword) }
             searchCursors[Triple(type,keyword,page-1)]
         }
-        if(type==ContentType.COMIC && page>1 && cursor==null) throw SearchSessionExpiredException()
+        if(page>1 && cursor==null) throw SearchSessionExpiredException()
+        if (cursor != null && cursor.deviceId != values["device_id"]) throw SearchSessionExpiredException()
         cursor?.let {
             if(it.searchId.isNotBlank()) values["search_id"]=it.searchId
             if(it.passback.isNotBlank()) values["passback"]=it.passback
             it.offset?.takeIf { offset -> offset>=0 }?.let { offset -> values["offset"]=offset.toString() }
         }
         val signed=signer.sign("https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v",values)
-        val data=JSONObject(text(signed.url,signed))
+        val raw=text(signed.url,signed)
+        // An empty HTTP 200 is ambiguous: probe one candidate, persist only a valid reply.
+        if (raw.isBlank()) throw DeviceIdentityRejectedException("搜索返回空响应，正在验证设备身份")
+        val data=try { JSONObject(raw) } catch(e: Exception) { throw IOException("搜索响应格式异常", e) }
         if(data.optInt("code",-1)!=0) {
             val message = data.str("message").ifEmpty { data.str("msg") }
             if (isIdentityRisk(200, message)) throw DeviceIdentityRejectedException("搜索接口拒绝设备标识")
@@ -138,7 +171,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             }
         }
         synchronized(searchCursors) {
-            searchCursors[Triple(type,keyword,page)]=SearchCursor(tab.str("search_id"),tab.str("passback"),tab.str("next_offset").toIntOrNull(),clock())
+            searchCursors[Triple(type,keyword,page)]=SearchCursor(values.getValue("device_id"),tab.str("search_id"),tab.str("passback"),tab.str("next_offset").toIntOrNull(),clock())
             while(searchCursors.size>100) searchCursors.remove(searchCursors.keys.first())
         }
         return CatalogPage(valid(list),tab.optBoolean("has_more",false) && page<100)
@@ -261,6 +294,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     companion object {
         @Volatile var deviceStore: PlayerDeviceStore? = null
+        @Volatile var searchDeviceStore: PlayerDeviceStore? = null
         fun extractRouter(html: String): JSONObject {
             val marker=html.indexOf("_ROUTER_DATA"); if(marker<0) throw IOException("页面没有内容数据")
             val first=html.indexOf('{',marker); if(first<0) throw IOException("页面数据格式错误")
