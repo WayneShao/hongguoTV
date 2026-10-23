@@ -28,3 +28,12 @@
 - JUnit（仅测试）：https://github.com/junit-team/junit4 — EPL-1.0
 
 应用图标和 TV banner 沿用本仓库素材。这里的应用不是内容平台官方客户端。
+
+## Search repair (0.9.4)
+
+The website JSON search route and page validation are adapted from
+`tsukiyo-zero/hongguoTV` commit `2e9b7daf5be227551a95adc4c77398935acf9a77`.
+Search device registration is adapted from `wanwdbb/hongguoTV` commit
+`46babe6da95ea8b0422ed8a1affb723ce98b390e`. Both are GPL-3.0 derivatives
+of hongguoTV. Local changes retain transactional candidate validation and
+separate search/playback stores, unify search, and retain existing RayNeo input.
