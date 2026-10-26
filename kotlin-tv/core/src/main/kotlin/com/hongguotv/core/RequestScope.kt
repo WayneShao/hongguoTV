@@ -37,8 +37,10 @@ class RequestScope {
         }
     }
 
+    @Synchronized private fun checkActive() { if(cancelled) throw java.io.InterruptedIOException("请求已取消") }
     companion object {
         private val current = ThreadLocal<RequestScope>()
+        fun ensureActive() { if(Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("请求已取消"); current.get()?.checkActive() }
         fun <T> execute(call: Call, consume: (Response) -> T): T {
             val owner = current.get()
             owner?.attach(call)

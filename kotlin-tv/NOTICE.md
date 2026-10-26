@@ -37,3 +37,13 @@ Search device registration is adapted from `wanwdbb/hongguoTV` commit
 `46babe6da95ea8b0422ed8a1affb723ce98b390e`. Both are GPL-3.0 derivatives
 of hongguoTV. Local changes retain transactional candidate validation and
 separate search/playback stores, unify search, and retain existing RayNeo input.
+
+## Official account integration (0.9.5)
+
+QR login, account models, account list APIs, history/progress upload and the durable
+outbox are adapted from wanwdbb/hongguoTV commit
+`d5e4c5f800b36cbd1c907eda87da2be647adb88d` (GPL-3.0-only).
+AuthTest, AccountTest, AccountHistoryUploadTest and HistorySyncPlannerTest are
+adapted from that source. Local integration isolates AccountRepository from
+anonymous content, adds an app-owned account screen, guards asynchronous login
+and account switching, preserves stereo input, and does not claim guest history.
