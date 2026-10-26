@@ -41,3 +41,10 @@ proxy or network settings were changed. No credentials were requested or logged.
 Delivery: version 0.9.5; TV versionCode 14, both RayNeo variants versionCode 20.
 All use their existing package names, labels and signing keys. Full and Keyboard
 variants retain the existing embedded input/voice split.
+
+## Display name starting with the next release after 0.9.5
+
+The TV launcher/application label and in-app name are 红果TV, matching the glasses
+variants. Do not append 原生版, TV edition or device names. Keep the existing TV
+applicationId and signing key for data-preserving upgrades. Existing published
+0.9.5 artifacts are not replaced for this naming-only change.
