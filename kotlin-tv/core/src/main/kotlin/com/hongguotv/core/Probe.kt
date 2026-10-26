@@ -1,6 +1,15 @@
 package com.hongguotv.core
 
 fun main(args: Array<String>) {
+    if(args.contains("--account-qr-only")) {
+        val account=AccountRepository()
+        try {
+            val qr=account.createLoginQr()
+            check(qr.image.startsWith("data:image/"))
+            println("accountQr imageReceived=true expiresInSeconds=${(qr.expiresAt-System.currentTimeMillis())/1000}")
+        } finally { account.cancelLoginQr(); account.http.connectionPool.evictAll(); account.http.dispatcher.executorService.shutdown() }
+        return
+    }
     if (args.contains("--search-only")) {
         val http=okhttp3.OkHttpClient.Builder().connectTimeout(10,java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS)
