@@ -42,9 +42,9 @@ Delivery: version 0.9.5; TV versionCode 14, both RayNeo variants versionCode 20.
 All use their existing package names, labels and signing keys. Full and Keyboard
 variants retain the existing embedded input/voice split.
 
-## Display name starting with the next release after 0.9.5
+## Display name in the repackaged 0.9.5 TV build
 
 The TV launcher/application label and in-app name are 红果TV, matching the glasses
 variants. Do not append 原生版, TV edition or device names. Keep the existing TV
-applicationId and signing key for data-preserving upgrades. Existing published
-0.9.5 artifacts are not replaced for this naming-only change.
+applicationId and signing key for data-preserving upgrades. At the user's request, the local 0.9.5 TV APK is rebuilt with this name; versionCode
+14 and versionName 0.9.5-local are retained. The previous APK is kept locally for rollback.
