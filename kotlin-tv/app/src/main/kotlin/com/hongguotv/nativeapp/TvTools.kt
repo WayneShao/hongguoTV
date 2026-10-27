@@ -51,7 +51,7 @@ class TvTools(private val activity: Activity) {
     }
     fun chooseSelected(title: String,labels: List<String>,selected: Int,anchor: View?,onChoice: (Int)->Unit) {
         val index=selected.coerceIn(0,labels.lastIndex)
-        val next=RayNeoDialogs.builder(activity).setTitle(title)
+        val next=AlertDialog.Builder(activity).setTitle(title)
             .setSingleChoiceItems(labels.toTypedArray(),index) { dialog,choice -> onChoice(choice); dialog.dismiss() }
             .setNegativeButton("取消",null).create()
         open(next,anchor); next.listView.setSelection(index); next.listView.requestFocus()
