@@ -42,7 +42,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             if (!response.isSuccessful) {
                 val error = response.body?.string().orEmpty()
                 if (isIdentityRisk(response.code, error)) throw DeviceIdentityRejectedException("设备标识被拒绝（HTTP ${response.code}）")
-                throw IOException("内容请求失败（HTTP ${response.code}）")
+                throw PlaybackHttpException(response.code)
             }
             val body = response.body ?: throw IOException("内容响应为空")
             if (body.contentLength() > 16*1024*1024) throw IOException("内容响应过大")
@@ -189,6 +189,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if (deviceStore != null) {
             try { return devices.recover { device -> playerStream(id, maxQuality, device) } }
             catch (e: Exception) {
+                RequestScope.ensureActive()
                 // Keep the previous protocol as a fallback, but do not start a second
                 // random-identity rotation after the registered candidate failed.
                 return streamOnce(id, maxQuality)
@@ -208,7 +209,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         for ((url, body, headers) in requests) {
             try {
                 val signed = PlayerSigner.headers(url.substringAfter('?', ""), body)
-                val data = JSONObject(fetch(url, headers + signed, body))
+                val data = JSONObject(PlaybackReadRetry().read { fetch(url, headers + signed, body) })
                 val code = data.optInt("code", data.optInt("Code", 0))
                 if (code == 10001 || code == 10002 || code == 110001) throw DeviceRejectedException("播放接口拒绝该设备")
                 sawResponse = true
@@ -223,7 +224,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                     }
                 }
             } catch (e: DeviceRejectedException) { rejected = true }
-            catch (e: Exception) { transportFailure = e }
+            catch (e: Exception) { RequestScope.ensureActive(); transportFailure = e }
         }
         val chosen = StreamModels.pick(rows, maxQuality)
             ?: run {
@@ -240,7 +241,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         body?.let { request.post(it.toRequestBody("application/json; charset=UTF-8".toMediaType())) }
         return RequestScope.execute(http.newCall(request.build())) { response ->
             if (response.code == 401 || response.code == 403) throw DeviceRejectedException("播放请求被拒绝（HTTP ${response.code}）")
-            if (!response.isSuccessful) throw IOException("内容请求失败（HTTP ${response.code}）")
+            if (!response.isSuccessful) throw PlaybackHttpException(response.code)
             val bodyStream = response.body ?: throw IOException("内容响应为空")
             if (bodyStream.contentLength() > 16 * 1024 * 1024) throw IOException("内容响应过大")
             val input = bodyStream.byteStream(); val out = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
@@ -263,7 +264,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             "device_id" to VendorConstants.device.getValue("device_id"),"iid" to VendorConstants.device.getValue("iid")
         )
         val signed=signer.signSimple("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/",values,payload)
-        val resp=text(signed.url,signed)
+        val resp=PlaybackReadRetry().read { text(signed.url,signed) }
         if(resp.isBlank()) throw IOException("播放接口未返回有效数据，请稍后再试")
         val data=JSONObject(resp)
         if(data.optInt("Code",data.optInt("code",0))!=0) {

@@ -47,3 +47,15 @@ AuthTest, AccountTest, AccountHistoryUploadTest and HistorySyncPlannerTest are
 adapted from that source. Local integration isolates AccountRepository from
 anonymous content, adds an app-owned account screen, guards asynchronous login
 and account switching, preserves stereo input, and does not claim guest history.
+
+## Playback preparation and configurable preload (0.9.6)
+
+Progressive RemoteVideo/VideoDataSource and associated streaming tests are adapted
+from tsukiyo-zero/hongguoTV (e606c8d7c236369dcfe222c5eae17b0f0cf5bfa4 and its
+6c15f857a1/25e4d0b0c6 predecessors), GPL-3.0-only. Episode-ID/index resume fallback
+and bounded empty-body retry follow that repair, integrated with this fork's
+registered identity recovery. Buffering watchdog and total range timeout follow
+wanwdbb/hongguoTV bcd229874b875a09b4c7de9b1c3cafe5f85e5f87.
+The disk-backed rolling window, duration/count settings, independent check clocks
+and preparation ownership wrapper are local adaptations. Furthest-progress-wins,
+Media3 upgrades, account rework and the upstream auto-feed UI were not imported.

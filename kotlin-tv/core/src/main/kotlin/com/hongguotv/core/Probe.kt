@@ -1,6 +1,28 @@
 package com.hongguotv.core
 
 fun main(args: Array<String>) {
+    if(args.contains("--preload-probe")) {
+        val repository=ContentRepository()
+        fun slot()=object: PlayerDeviceStore { var value: String?=null; override fun load()=value; override fun save(value: String?) { this.value=value } }
+        ContentRepository.searchDeviceStore=slot(); ContentRepository.deviceStore=slot()
+        val dir=java.nio.file.Files.createTempDirectory("hongguo-preload-probe").toFile()
+        try {
+            val series=repository.search("总裁").items.first()
+            val detail=repository.detail(series.id)
+            RemoteVideo(repository.http,repository.stream(detail.episodes.first(),480)).use { video ->
+                video.prepare(); println("preloadProbe durationMs=${video.durationMs()} size=${video.total}")
+                video.preload(dir,{false})
+                check(video.read(0,16).copyOfRange(4,8).contentEquals("ftyp".toByteArray()))
+                println("preloadProbe cachedBytes=${video.cachedSize()} complete=${video.cachedSize()==video.total}")
+            }
+            check(dir.listFiles().orEmpty().isEmpty())
+        } finally {
+            ContentRepository.searchDeviceStore=null;ContentRepository.deviceStore=null
+            dir.deleteRecursively();repository.http.connectionPool.evictAll();repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
+
     if(args.contains("--account-qr-only")) {
         val account=AccountRepository()
         try {

@@ -50,6 +50,13 @@ class TvTools(private val activity: Activity) {
         if(extra!=null) builder.setNeutralButton(extra) { _,_-> onExtra() }
         val next=builder.create(); open(next,anchor); next.listView.requestFocus()
     }
+    fun chooseSelected(title: String,labels: List<String>,selected: Int,anchor: View?,onChoice: (Int)->Unit) {
+        val index=selected.coerceIn(0,labels.lastIndex)
+        val next=RayNeoDialogs.builder(activity).setTitle(title)
+            .setSingleChoiceItems(labels.toTypedArray(),index) { dialog,choice -> onChoice(choice); dialog.dismiss() }
+            .setNegativeButton("取消",null).create()
+        open(next,anchor); next.listView.setSelection(index); next.listView.requestFocus()
+    }
     fun episodePicker(count: Int,current: Int,anchor: View?,select: (Int)->Unit) {
         val content=column(); var digits=(current+1).toString(); var replace=true
         val value=label(digits,28f).apply { gravity=Gravity.CENTER }; content.addView(value)

@@ -73,13 +73,32 @@ class MainActivity: Activity() {
     }
 
     private val networkCleanup=Executors.newSingleThreadExecutor()
+    private val preloadPreferences by lazy { PreloadPreferences(this) }
+    private var preloadConfig=PreloadSettings()
+    private val preloadClock=PreloadCheckClock()
+    private var preloadCycle=false
+    @Volatile private var prefetchAllowed=false
     private val prefetchWorker=Executors.newSingleThreadExecutor()
-    private var prefetchHttp: okhttp3.OkHttpClient?=null
+    private val prefetchHttp by lazy { repository.http.newBuilder()
+        .connectionPool(okhttp3.ConnectionPool()).dispatcher(okhttp3.Dispatcher()).build() }
+    private val prefetchDirectory by lazy { java.io.File(cacheDir,"episode-prefetch").also { dir ->
+        dir.mkdirs(); dir.listFiles()?.filter { it.name.startsWith("hongguo-prefetch-") && it.extension=="part" }?.forEach { it.delete() }
+    } }
+    private val upcoming by lazy { RollingPrefetch<RemoteVideo>(prefetchWorker,
+        load={ key,claimed,budget ->
+            val id=key.substringBefore(':'); val cap=key.substringAfter(':').toInt()
+            val remote=RemoteVideo(prefetchHttp,repository.stream(id,cap))
+            try { remote.prepare(); remote.preload(prefetchDirectory,{
+                while(!prefetchAllowed && !claimed()) {
+                    RequestScope.ensureActive()
+                    try { Thread.sleep(100) } catch(e: InterruptedException) { Thread.currentThread().interrupt(); throw java.io.InterruptedIOException("请求已取消") }
+                }
+                claimed()
+            },budget) } catch(e: Exception) { remote.close(); throw e }
+        }, duration={ if(it.cachedSize()>=it.total) it.durationMs() else null },
+        bytes={ it.cachedSize() }, clock={ android.os.SystemClock.elapsedRealtime() }, memory={it.retainedBytes()}) }
+    private var playbackPreparation: PendingPreparation<RemoteVideo>?=null
     private var playbackHttp: okhttp3.OkHttpClient?=null
-    private val preparedNext=PreparedSlot<RemoteVideo>({ android.os.SystemClock.elapsedRealtime() })
-    private var prefetchJob: java.util.concurrent.Future<*>?=null
-    private var prefetchScope: RequestScope?=null
-    private var prefetchedFor=""
     private var readySince=0L
     private lateinit var artwork: ArtworkLoader
     private data class DeferredUi(val apply: ()->Unit,val discard: ()->Unit={})
@@ -106,8 +125,6 @@ class MainActivity: Activity() {
     private val scrollPositions=mutableMapOf<String,Int>()
     private val catalogCards=linkedMapOf<String,View>()
     private val cardImages=linkedMapOf<String,Pair<ImageView,String>>()
-    private var prefetchAttemptAt=0L
-    private var prefetchAttempts=0
     private var homeScreen: HomeScreen?=null
     private var selectionPreview: SeriesPreview?=null
     private var homeFromCache=false
@@ -199,12 +216,18 @@ class MainActivity: Activity() {
     private var pendingSeek: Long?=null
     private var playError=false
     private var lastSaved=0L
+    private var recoveryReason=""
     private var quality=""
+    private val bufferingWatchdog=BufferingWatchdog()
     private val tick=object: Runnable {
         override fun run() {
             if(!foreground || isDestroyed) return
             if(screen=="player") {
                 if(sleepTimer.poll()) stopForSleep()
+                val buffering=player?.playbackState==Player.STATE_BUFFERING && requestedAutoplay && !pausedForLifecycle && episodePanel==null && !playError && !sleepStopped
+                if(bufferingWatchdog.poll(android.os.SystemClock.elapsedRealtime(),buffering)) {
+                    video?.close(); playerFailure(java.net.SocketTimeoutException("视频缓冲超过 30 秒"))
+                }
                 if(hud.visibility==View.VISIBLE) updatePlaybackText()
                 maybePrefetch()
                 val now=android.os.SystemClock.elapsedRealtime()
@@ -238,6 +261,7 @@ class MainActivity: Activity() {
         ContentRepository.deviceStore = PreferencesPlayerDeviceStore(getSharedPreferences("registered-player", Context.MODE_PRIVATE))
         ContentRepository.searchDeviceStore = PreferencesPlayerDeviceStore(getSharedPreferences("registered-search", Context.MODE_PRIVATE))
         DeviceIdentity.configure(this)
+        preloadConfig=preloadPreferences.load()
         AuthStore.restore(this,accountRepository)
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }
@@ -282,6 +306,7 @@ class MainActivity: Activity() {
         artwork.load(view,url,if(focused) ArtworkLoader.PRIORITY_FOCUSED else ArtworkLoader.PRIORITY_VISIBLE)
     }
     private fun cancelWork() {
+        playbackPreparation?.close(); playbackPreparation=null
         deferredWork?.discard?.invoke(); deferredWork=null
         workScope?.cancel(); workScope=null
         workJob?.cancel(true); workJob=null
@@ -765,6 +790,48 @@ class MainActivity: Activity() {
         } }
         left.forEachIndexed { i,v -> v.nextFocusLeftId=v.id; v.nextFocusRightId=right[i].id }
         right.forEachIndexed { i,v -> v.nextFocusLeftId=left[i].id; v.nextFocusRightId=v.id }
+        val preloadGroup=column().apply { setPadding(dp(12),dp(12),dp(12),dp(4)) }
+        parent.addView(preloadGroup)
+        heading(preloadGroup,"预加载","当前播放稳定后补充；时间和集数分别保存")
+        lateinit var modeButton: TextView
+        lateinit var thresholdButton: TextView
+        lateinit var intervalButton: TextView
+        fun refreshPreloadLabels() {
+            val timed=preloadConfig.mode==PreloadMode.TIME
+            modeButton.text="预加载模式  ·  ${if(timed) "按时间" else "按集数"}"
+            thresholdButton.text="预加载阈值  ·  ${if(timed) "${preloadConfig.minutes} 分钟" else "${preloadConfig.episodes} 集"}"
+            intervalButton.text="检测频率  ·  ${if(timed) "每播放 ${preloadConfig.checkMinutes} 分钟" else "每播放 ${preloadConfig.checkEpisodes} 集"}"
+        }
+        fun savePreload(next: PreloadSettings) { preloadConfig=next.normalized(); preloadPreferences.save(preloadConfig); cancelPrefetch(); refreshPreloadLabels() }
+        modeButton=setting(preloadGroup,"") {
+            tvTools.chooseSelected("预加载模式",listOf("按时间","按集数"),preloadConfig.mode.ordinal,modeButton) {
+                savePreload(preloadConfig.copy(mode=PreloadMode.entries[it]))
+            }
+        }
+        thresholdButton=setting(preloadGroup,"") {
+            val timed=preloadConfig.mode==PreloadMode.TIME
+            val values=if(timed) PreloadSettings.timeTargets else PreloadSettings.episodeTargets
+            val selected=if(timed) preloadConfig.minutes else preloadConfig.episodes
+            tvTools.chooseSelected("预加载阈值",values.map { "$it ${if(timed) "分钟" else "集"}" },values.indexOf(selected),thresholdButton) {
+                savePreload(if(timed) preloadConfig.copy(minutes=values[it]) else preloadConfig.copy(episodes=values[it]))
+            }
+        }
+        intervalButton=setting(preloadGroup,"") {
+            val timed=preloadConfig.mode==PreloadMode.TIME
+            val values=if(timed) PreloadSettings.timeIntervals else PreloadSettings.episodeIntervals
+            val selected=if(timed) preloadConfig.checkMinutes else preloadConfig.checkEpisodes
+            tvTools.chooseSelected("预加载检测频率",values.map { "每播放 $it ${if(timed) "分钟" else "集"}" },values.indexOf(selected),intervalButton) {
+                savePreload(if(timed) preloadConfig.copy(checkMinutes=values[it]) else preloadConfig.copy(checkEpisodes=values[it]))
+            }
+        }
+        refreshPreloadLabels()
+        val preloadButtons=listOf(modeButton,thresholdButton,intervalButton)
+        preloadButtons.forEachIndexed { index,v ->
+            v.nextFocusUpId=preloadButtons.getOrNull(index-1)?.id ?: left.last().id
+            v.nextFocusDownId=preloadButtons.getOrNull(index+1)?.id ?: v.id
+            v.nextFocusLeftId=v.id; v.nextFocusRightId=v.id
+        }
+        left.last().nextFocusDownId=modeButton.id; right.last().nextFocusDownId=modeButton.id
         nav.forEach { it.nextFocusDownId=accountEntry.id }; accountEntry.nextFocusUpId=nav[tab].id; accountEntry.nextFocusDownId=qualityButton.id
         parent.addView(text("红果TV  /  ${BuildConfig.VERSION_NAME}    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
         nav[tab].requestFocus()
@@ -796,9 +863,10 @@ class MainActivity: Activity() {
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
         val body=base(series.title); message(body,"正在加载剧集…")
         val capturedAccount=accountRepository.currentSession()
+        val chosenHistory=cloudHistory[series.id].takeIf { accountReturn && accountReturnSection=="history" && capturedAccount!=null && cloudOwner==capturedAccount.user.id }
         playbackAccount=capturedAccount
         work({
-            val remote=if(capturedAccount!=null) runCatching { accountRepository.accountVideoProgress(capturedAccount) }.getOrNull()
+            val remote=chosenHistory ?: if(capturedAccount!=null) runCatching { accountRepository.accountVideoProgress(capturedAccount) }.getOrNull()
                 ?.firstOrNull { it.seriesId==series.id }?.let { AccountHistoryItem(series,it.episodeId,it.episodeIndex,it.position,0,it.readAt) } else null
             repository.detail(series.id) to remote
         }, { loaded ->
@@ -808,8 +876,8 @@ class MainActivity: Activity() {
             } }
             detail=result.copy(series=result.series.copy(bookType=series.bookType.takeIf { it in 2..5 } ?: result.series.bookType))
             library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
-            val progress=accountProgress(series.id)
-            val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
+            val progress=chosenHistory?.let { WatchProgress(it.series,it.episodeId,it.episodeIndex,it.position,it.duration,false,it.readAt) } ?: accountProgress(series.id)
+            val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true,progress?.episodeIndex)
             episodeIndex=target.index; group=episodeIndex/20
             if(resume) playEpisode(target.index,target.position,autoplay=detailAutoplay) else showDetail(false)
         }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
@@ -828,8 +896,8 @@ class MainActivity: Activity() {
         info.addView(synopsis)
         val actions=row(); actions.setPadding(0,dp(12),0,0); info.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(actions) },lp(-1,-2))
         val progress=accountProgress(data.series.id)
-        val resumeIndex=progress?.let { data.episodes.indexOf(it.episodeId).takeIf { n -> n>=0 } } ?: 0
-        val resumePosition=progress?.takeIf { !it.completed && resumeIndex==it.episodeIndex }?.position ?: 0
+        val resumeIndex=ResumePlayback.target(data.episodes,progress?.episodeId,0,false,progress?.episodeIndex).index
+        val resumePosition=ResumePlayback.target(data.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true,progress?.episodeIndex).position
         val watched=library.watched(data.series.id)
         val play=addButton(actions,if(watched) "重新观看" else if(progress!=null && !progress.completed) "继续第 ${resumeIndex+1} 集" else "开始观看") { playEpisode(if(watched) 0 else if(progress?.completed==true) (resumeIndex+1).coerceAtMost(data.episodes.lastIndex) else resumeIndex,if(watched) 0 else resumePosition) }
         lateinit var favorite: TextView
@@ -871,20 +939,22 @@ class MainActivity: Activity() {
         val playbackStarted=android.os.SystemClock.elapsedRealtime()
         val reuse=screen=="player" && player!=null && playerView!=null && !recovering && !playError
         library.setWatched(data.series.id,false)
+        if(screen!="player" || recovering) { preloadClock.reset(); preloadCycle=false }
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
-        val prefetched=if(position==0L && !recovering) preparedNext.take("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
-        val claimedHttp=if(prefetched!=null) prefetchHttp.also { prefetchHttp=null } else null
+        bufferingWatchdog.reset(); prefetchAllowed=false
+        val prefetched=if(!recovering) upcoming.claim("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
+        upcoming.update(data.episodes.drop(selectedIndex+1).map { "$it:${library.maxQuality}" })
         saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
-            cancelRecovery(); cancelPrefetch(); tvTools.close()
+            cancelRecovery(); tvTools.close()
             episodePanel?.dismiss(); episodePanel=null; speedDialog?.dismiss(); speedDialog=null
             playerListener?.let { player?.removeListener(it) }; playerListener=null
             player?.stop(); player?.clearMediaItems()
             video?.close(); video=null; closeTransport(playbackHttp); playbackHttp=null
             main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
-        } else releasePlayer()
+        } else releasePlayer(keepUpcoming=true)
         artwork.cancelPage(clearMemory=true)
-        playbackHttp=claimedHttp; video=prefetched
+        playbackHttp=null; video=null
         var firstReady=true; var firstFrame=true
         if(!recovering) recovery.reset()
         autoRecovery=false; readySince=0; startPosition=position.coerceAtLeast(0); requestedAutoplay=autoplay
@@ -892,7 +962,6 @@ class MainActivity: Activity() {
         screen="player"; episodeIndex=selectedIndex; group=episodeIndex/20
         panel=false; playError=false; playbackReady=false; quality=""; pausedForLifecycle=!autoplay
         player?.playWhenReady=requestedAutoplay
-        prefetchAttempts=0; prefetchAttemptAt=0
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if(!reuse) {
             root.removeAllViews(); root.setBackgroundColor(Color.TRANSPARENT)
@@ -915,7 +984,15 @@ class MainActivity: Activity() {
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
-        work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).prepare() }, { remote ->
+        work({
+            val cached=if(prefetched!=null) try { prefetched.await() } catch(e: Exception) {
+                RequestScope.ensureActive(); null
+            } finally { prefetched.close() } else null
+            cached ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).let {
+                try { it.prepare() } catch(e: Exception) { it.close(); throw e }
+            }
+        }, { remote ->
+            playbackPreparation=null
             video=remote; quality=remote.info.quality
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
@@ -931,6 +1008,7 @@ class MainActivity: Activity() {
                 private fun active()=player===p && generation==ticket && p.currentMediaItem?.mediaId==requestedId
                 override fun onPlaybackStateChanged(state: Int) {
                     if(!active()) return
+                    if(state!=Player.STATE_BUFFERING) bufferingWatchdog.reset()
                     if(state==Player.STATE_READY) {
                         if(!p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
                             playerFailure(PlaybackException("资源没有可解码的视频轨道",null,PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED))
@@ -942,6 +1020,7 @@ class MainActivity: Activity() {
                     }
                     syncMediaSession()
                     if(state==Player.STATE_ENDED) {
+                        preloadClock.episodeCompleted()
                         saveProgress(true)
                         if(sleepTimer.episodeEnded()) stopForSleep()
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
@@ -963,53 +1042,50 @@ class MainActivity: Activity() {
             val source=ProgressiveMediaSource.Factory { VideoDataSource(remote) }.createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri("hongguotv://episode/$requestedId").setMimeType(MimeTypes.VIDEO_MP4).build())
             p.setMediaSource(source); p.seekTo(position.coerceAtLeast(0)); p.prepare(); p.playWhenReady=foreground && requestedAutoplay && !pausedForLifecycle && episodePanel==null
         }, { problem -> playerFailure(problem) })
+        playbackPreparation=prefetched
     }
     private fun closeTransport(http: okhttp3.OkHttpClient?) {
         if(http==null) return
         // Closing an idle TLS connection can write close_notify; keep it off the UI thread.
         networkCleanup.execute { http.dispatcher.cancelAll(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
     }
-    private fun cancelPrefetch() {
-        prefetchScope?.cancel(); prefetchScope=null
-        preparedNext.clear(); prefetchJob?.cancel(true); prefetchJob=null
-        closeTransport(prefetchHttp); prefetchHttp=null; prefetchedFor=""
-    }
+    private fun cancelPrefetch() { prefetchAllowed=false; preloadCycle=false; preloadClock.reset(); upcoming.close() }
     private fun maybePrefetch() {
+        prefetchAllowed=false
         val p=player ?: return; val data=detail ?: return
-        if(!foreground || !p.isPlaying || !library.autoNext || playError || sleepStopped || episodeIndex>=data.episodes.lastIndex) return
-        if(!PrefetchPolicy.nearEnd(p.currentPosition,p.duration,p.playbackParameters.speed)) return
-        val id=data.episodes[episodeIndex+1]; val quality=library.maxQuality; val key="$id:$quality"
-        if(preparedNext.isFresh(key) || prefetchJob?.isDone==false) return
         val now=android.os.SystemClock.elapsedRealtime()
-        if(readySince==0L || now-readySince<3000 || p.bufferedPosition-p.currentPosition<5000) return
-        if(prefetchAttempts>=3 || (prefetchAttempts>0 && now-prefetchAttemptAt<15_000) || connectivity.isActiveNetworkMetered || !networkAvailable()) return
-        cancelPrefetch(); prefetchedFor=key; prefetchAttemptAt=now; prefetchAttempts++
-        val ticket=preparedNext.begin(key)
-        val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).build()
-        val source=ContentRepository(http, prepareIdentityRetry = DeviceIdentity::prepareRotation, commitIdentityRetry = DeviceIdentity::commitRotation, rollbackIdentityRetry = DeviceIdentity::rollbackRotation); prefetchHttp=http
-        val scope=RequestScope(); prefetchScope=scope
-        prefetchJob=prefetchWorker.submit {
-            var remote: RemoteVideo?=null
-            try {
-                val prepared=scope.run {
-                    RemoteVideo(http,source.stream(id,quality)).also { remote=it; it.warm() }
-                }
-                if(preparedNext.complete(ticket,key,prepared)) android.util.Log.i("HongguoTV","Next episode prepared near end")
-            } catch(_: Exception) { remote?.close() }
+        preloadClock.sample(now,foreground && p.isPlaying,p.playbackParameters.speed)
+        if(!library.autoNext || connectivity.isActiveNetworkMetered) { cancelPrefetch(); return }
+        if(!foreground || !p.isPlaying || playError || sleepStopped || episodeIndex>=data.episodes.lastIndex) return
+        val remaining=(p.duration-p.currentPosition).coerceAtLeast(0)
+        if(readySince==0L || now-readySince<1500 || p.bufferedPosition-p.currentPosition<minOf(5000L,remaining) || !networkAvailable()) return
+        prefetchAllowed=true
+        if(preloadClock.due(preloadConfig)) {
+            upcoming.configure(preloadConfig)
+            upcoming.update(data.episodes.drop(episodeIndex+1).map { "$it:${library.maxQuality}" })
+            preloadClock.checked(); preloadCycle=true
         }
+        if(preloadCycle) preloadCycle=upcoming.pump()
     }
     private fun networkAvailable(): Boolean = connectivity.getNetworkCapabilities(connectivity.activeNetwork)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)==true
     private fun currentPosition(): Long = pendingSeek ?: player?.currentPosition?.takeIf { playbackReady } ?: startPosition
     private fun cancelRecovery() { main.removeCallbacks(retryRunnable); retryPending=false; autoRecovery=false }
     private fun scheduleRecovery() {
         if(!foreground || !playError || !autoRecovery || retryPending) return
-        if(!recovery.remaining) { autoRecovery=false; playbackText.text="已自动重试 3 次，仍无法播放。可手动重试或切换清晰度。"; return }
-        if(!networkAvailable()) { playbackText.text="网络已断开，联网后自动续播 · 第 ${episodeIndex+1} 集 ${formatTime(retryPosition)}"; return }
+        if(!recovery.remaining) { autoRecovery=false; playbackText.text="已自动重试 3 次，仍无法播放。可手动重试或切换清晰度。\n$recoveryReason"; return }
+        if(!networkAvailable()) { playbackText.text="网络已断开，联网后自动续播 · 第 ${episodeIndex+1} 集 ${formatTime(retryPosition)}\n$recoveryReason"; return }
         val delay=recovery.delayMillis ?: return
-        playbackText.text="${if(retryAutoplay) "准备恢复播放" else "准备恢复暂停位置"} · ${delay/1000f} 秒后重试 ${recovery.attempts+1}/3 · ${formatTime(retryPosition)}"
+        playbackText.text="${if(retryAutoplay) "准备恢复播放" else "准备恢复暂停位置"} · ${delay/1000f} 秒后重试 ${recovery.attempts+1}/3 · ${formatTime(retryPosition)}\n$recoveryReason"
         retryPending=true; main.postDelayed(retryRunnable,delay)
     }
     private fun playerFailure(problem: Throwable) {
+        recoveryReason=when {
+            problem is java.net.SocketTimeoutException -> "视频读取或缓冲超时"
+            problem is java.net.UnknownHostException -> "内容服务地址解析失败"
+            problem.message?.contains("未返回有效数据")==true -> "播放接口暂时返回空内容"
+            problem is PlaybackException && problem.errorCode in 3000..4999 -> "视频解码失败"
+            else -> "播放请求失败，请检查网络或稍后重试"
+        }
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
         saveProgress(); cancelRecovery(); cancelPrefetch()
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
@@ -1212,8 +1288,10 @@ class MainActivity: Activity() {
         } }
 
     }
-    private fun releasePlayer() {
-        cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()
+    private fun releasePlayer(keepUpcoming: Boolean=false) {
+        bufferingWatchdog.reset()
+        if(!keepUpcoming) cancelPrefetch()
+        cancelRecovery(); mediaSession.deactivate(); tvTools.close()
         val wasForeground=foreground; foreground=false
         val oldPanel=episodePanel; episodePanel=null; oldPanel?.dismiss(); foreground=wasForeground
         speedDialog?.dismiss(); speedDialog=null
@@ -1305,6 +1383,7 @@ class MainActivity: Activity() {
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
+        bufferingWatchdog.reset()
         accountScreen?.close(); accountHistorySync.flush()
         updater.pause(); notices.close()
         foreground=false; main.removeCallbacks(tick); cancelRecovery(); cancelPrefetch(); mediaSession.deactivate()
@@ -1328,7 +1407,7 @@ class MainActivity: Activity() {
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()
         artwork.close(); releaseCatalogViews(); mediaSession.release(); main.removeCallbacksAndMessages(null)
-        io.shutdownNow(); prefetchWorker.shutdownNow(); networkCleanup.shutdown()
+        closeTransport(prefetchHttp); io.shutdownNow(); prefetchWorker.shutdownNow(); networkCleanup.shutdown()
         Thread({ repository.http.dispatcher.cancelAll(); repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown() },"hongguotv-network-cleanup").start()
         super.onDestroy()
     }
