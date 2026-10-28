@@ -77,7 +77,9 @@ class MainActivity: Activity() {
     private var preloadConfig=PreloadSettings()
     private val preloadClock=PreloadCheckClock()
     private var preloadCycle=false
-    @Volatile private var prefetchAllowed=false
+    private val preloadGate=PreloadGate { android.os.SystemClock.elapsedRealtime() }.apply { onDemand={ backgroundVideo?.yieldToForeground() } }
+    @Volatile private var backgroundVideo: RemoteVideo?=null
+    private var episodeRequestBudget=PlaybackRequestBudget()
     private val prefetchWorker=Executors.newSingleThreadExecutor()
     private val prefetchHttp by lazy { repository.http.newBuilder()
         .connectionPool(okhttp3.ConnectionPool()).dispatcher(okhttp3.Dispatcher()).build() }
@@ -87,14 +89,18 @@ class MainActivity: Activity() {
     private val upcoming by lazy { RollingPrefetch<RemoteVideo>(prefetchWorker,
         load={ key,claimed,budget ->
             val id=key.substringBefore(':'); val cap=key.substringAfter(':').toInt()
-            val remote=RemoteVideo(prefetchHttp,repository.stream(id,cap))
-            try { remote.prepare(); remote.preload(prefetchDirectory,{
-                while(!prefetchAllowed && !claimed()) {
-                    RequestScope.ensureActive()
-                    try { Thread.sleep(100) } catch(e: InterruptedException) { Thread.currentThread().interrupt(); throw java.io.InterruptedIOException("请求已取消") }
-                }
-                claimed()
-            },budget) } catch(e: Exception) { remote.close(); throw e }
+            preloadGate.await(claimed)
+            try {
+                val remote=RemoteVideo(prefetchHttp,repository.stream(id,cap,PlaybackRequestBudget(4,1)),preloadGate,background=true)
+                backgroundVideo=remote
+                var failures=0
+                try { preloadGate.await(claimed); remote.prepare(); remote.preload(prefetchDirectory,{
+                    preloadGate.await(claimed); claimed()
+                },budget) { error -> preloadGate.failed(error); ++failures<2 } }
+                catch(e: Exception) { remote.close(); throw e }
+                finally { backgroundVideo=null }
+            } catch(e: Exception) { preloadGate.failed(e); throw e }
+
         }, duration={ if(it.cachedSize()>=it.total) it.durationMs() else null },
         bytes={ it.cachedSize() }, clock={ android.os.SystemClock.elapsedRealtime() }, memory={it.retainedBytes()}) }
     private var playbackPreparation: PendingPreparation<RemoteVideo>?=null
@@ -225,8 +231,8 @@ class MainActivity: Activity() {
             if(screen=="player") {
                 if(sleepTimer.poll()) stopForSleep()
                 val buffering=player?.playbackState==Player.STATE_BUFFERING && requestedAutoplay && !pausedForLifecycle && episodePanel==null && !playError && !sleepStopped
-                if(bufferingWatchdog.poll(android.os.SystemClock.elapsedRealtime(),buffering)) {
-                    video?.close(); playerFailure(java.net.SocketTimeoutException("视频缓冲超过 30 秒"))
+                if(bufferingWatchdog.poll(android.os.SystemClock.elapsedRealtime(),buffering,video?.deliveredBytes ?: 0L,player?.bufferedPosition ?: 0L)) {
+                    video?.cancelReads(); playerFailure(java.net.SocketTimeoutException("视频读取停滞超过 30 秒"))
                 }
                 if(hud.visibility==View.VISIBLE) updatePlaybackText()
                 maybePrefetch()
@@ -941,12 +947,21 @@ class MainActivity: Activity() {
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
         val data=detail ?: return
+        if(recovering && index==episodeIndex && video?.reusable==true && player!=null) {
+            cancelRecovery(); bufferingWatchdog.reset()
+            player?.stop(); video?.cancelReads()
+            playError=false; playbackReady=false; readySince=0
+            startPosition=position; requestedAutoplay=autoplay; pausedForLifecycle=!autoplay
+            controls.removeAllViews(); progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
+            player?.seekTo(position); player?.prepare(); player?.playWhenReady=foreground && autoplay
+            return
+        }
         val playbackStarted=android.os.SystemClock.elapsedRealtime()
         val reuse=screen=="player" && player!=null && playerView!=null && !recovering && !playError
         library.setWatched(data.series.id,false)
         if(screen!="player" || recovering) { preloadClock.reset(); preloadCycle=false }
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
-        bufferingWatchdog.reset(); prefetchAllowed=false
+        bufferingWatchdog.reset(); preloadGate.update(false,0,0); backgroundVideo?.yieldToForeground()
         val prefetched=if(preloadConfig.enabled && !recovering) upcoming.claim("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
         if(preloadConfig.enabled) upcoming.update(data.episodes.drop(selectedIndex+1).map { "$it:${library.maxQuality}" }) else cancelPrefetch()
         saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
@@ -961,7 +976,7 @@ class MainActivity: Activity() {
         artwork.cancelPage(clearMemory=true)
         playbackHttp=null; video=null
         var firstReady=true; var firstFrame=true
-        if(!recovering) recovery.reset()
+        if(!recovering) { recovery.reset(); episodeRequestBudget=PlaybackRequestBudget() }
         autoRecovery=false; readySince=0; startPosition=position.coerceAtLeast(0); requestedAutoplay=autoplay
         if(autoplay) sleepStopped=false
         screen="player"; episodeIndex=selectedIndex; group=episodeIndex/20
@@ -989,11 +1004,12 @@ class MainActivity: Activity() {
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
+        val requestBudget=episodeRequestBudget
         work({
             val cached=if(prefetched!=null) try { prefetched.await() } catch(e: Exception) {
                 RequestScope.ensureActive(); null
             } finally { prefetched.close() } else null
-            cached ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).let {
+            cached?.also { it.promote() } ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,requestBudget),preloadGate).let {
                 try { it.prepare() } catch(e: Exception) { it.close(); throw e }
             }
         }, { remote ->
@@ -1020,6 +1036,7 @@ class MainActivity: Activity() {
                             return
                         }
                         playbackReady=true
+                        if(readySince==0L) readySince=android.os.SystemClock.elapsedRealtime()
                         if(firstReady) { firstReady=false; readySince=android.os.SystemClock.elapsedRealtime(); android.util.Log.i("HongguoTV","Playback ready episode=${episodeIndex+1} preloaded=${prefetched!=null} reused=$reuse elapsedMs=${readySince-playbackStarted}") }
                         if(hud.visibility==View.VISIBLE) updatePlaybackText()
                     }
@@ -1044,7 +1061,7 @@ class MainActivity: Activity() {
                 override fun onPlayerError(error: PlaybackException) { if(active()) playerFailure(error) }
             }
             playerListener=listener; p.addListener(listener)
-            val source=ProgressiveMediaSource.Factory { VideoDataSource(remote) }.createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri("hongguotv://episode/$requestedId").setMimeType(MimeTypes.VIDEO_MP4).build())
+            val source=ProgressiveMediaSource.Factory { VideoDataSource(remote) }.setLoadErrorHandlingPolicy(androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy(0)).createMediaSource(MediaItem.Builder().setMediaId(requestedId).setUri("hongguotv://episode/$requestedId").setMimeType(MimeTypes.VIDEO_MP4).build())
             p.setMediaSource(source); p.seekTo(position.coerceAtLeast(0)); p.prepare(); p.playWhenReady=foreground && requestedAutoplay && !pausedForLifecycle && episodePanel==null
         }, { problem -> playerFailure(problem) })
         playbackPreparation=prefetched
@@ -1054,18 +1071,18 @@ class MainActivity: Activity() {
         // Closing an idle TLS connection can write close_notify; keep it off the UI thread.
         networkCleanup.execute { http.dispatcher.cancelAll(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
     }
-    private fun cancelPrefetch() { prefetchAllowed=false; preloadCycle=false; preloadClock.reset(); upcoming.close(); upcoming.configure(preloadConfig) }
+    private fun cancelPrefetch() { preloadGate.update(false,0,0); preloadCycle=false; preloadClock.reset(); upcoming.close(); upcoming.configure(preloadConfig) }
     private fun maybePrefetch() {
-        prefetchAllowed=false
         if(!preloadConfig.enabled) { cancelPrefetch(); return }
         val p=player ?: return; val data=detail ?: return
         val now=android.os.SystemClock.elapsedRealtime()
         preloadClock.sample(now,foreground && p.isPlaying,p.playbackParameters.speed)
         if(!library.autoNext || connectivity.isActiveNetworkMetered) { cancelPrefetch(); return }
-        if(!foreground || !p.isPlaying || playError || sleepStopped || episodeIndex>=data.episodes.lastIndex) return
+        val active=foreground && p.isPlaying && !playError && !sleepStopped && episodeIndex<data.episodes.lastIndex && networkAvailable()
+        preloadGate.update(active,p.bufferedPosition-p.currentPosition,(p.duration-p.currentPosition).coerceAtLeast(0))
+        if(!active || !preloadGate.allowed()) return
         val remaining=(p.duration-p.currentPosition).coerceAtLeast(0)
         if(readySince==0L || now-readySince<1500 || p.bufferedPosition-p.currentPosition<minOf(5000L,remaining) || !networkAvailable()) return
-        prefetchAllowed=true
         if(preloadClock.due(preloadConfig)) {
             upcoming.configure(preloadConfig)
             upcoming.update(data.episodes.drop(episodeIndex+1).map { "$it:${library.maxQuality}" })
@@ -1085,6 +1102,7 @@ class MainActivity: Activity() {
         retryPending=true; main.postDelayed(retryRunnable,delay)
     }
     private fun playerFailure(problem: Throwable) {
+        if(playError) return
         recoveryReason=when {
             problem is java.net.SocketTimeoutException -> "视频读取或缓冲超时"
             problem is java.net.UnknownHostException -> "内容服务地址解析失败"
@@ -1093,7 +1111,8 @@ class MainActivity: Activity() {
             else -> "播放请求失败，请检查网络或稍后重试"
         }
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
-        saveProgress(); cancelRecovery(); cancelPrefetch()
+        saveProgress(); cancelRecovery(); preloadGate.update(false,0,0); preloadGate.failed(problem); backgroundVideo?.yieldToForeground()
+        if(PlaybackRecoveryPolicy.needsNewAddress(problem)) { video?.close(); video=null } else video?.cancelReads()
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
         val decoding=problem is PlaybackException && problem.errorCode in 3000..4999
         val retryable=if(problem is PlaybackException) problem.errorCode in 2000..2999 || problem.errorCode==PlaybackException.ERROR_CODE_TIMEOUT else problem is java.io.IOException
@@ -1102,7 +1121,7 @@ class MainActivity: Activity() {
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
         addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
         addButton(actions,"返回选集") { returnToDetail(true) }
-        if(retryable && !sleepStopped) {
+        if(retryable && !sleepStopped && generateSequence(problem){it.cause}.none { it is PlaybackBudgetExceededException }) {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
             autoRecovery=true; scheduleRecovery()
         }
