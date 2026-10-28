@@ -20,16 +20,20 @@ internal class PlayerDeviceSource(
     private val store: () -> PlayerDeviceStore? = { ContentRepository.deviceStore },
     private val register: () -> PlayerDevice = { registrar.register(http) },
 ) {
-    @Synchronized
+    private fun activeDevice(): PlayerDevice {
+        val saved=store()?.load()?.let(PlayerDevice::fromJson)
+        return saved ?: PlayerDevice(VendorConstants.device.getValue("device_id"),VendorConstants.device.getValue("iid"),"","","")
+    }
     fun <T> recover(block: (PlayerDevice) -> T): T {
-        val saved = store()?.load()?.let(PlayerDevice::fromJson)
-        // Migration: first try the identity already used by the previous release.
-        val active = saved ?: PlayerDevice(VendorConstants.device.getValue("device_id"),
-            VendorConstants.device.getValue("iid"), "", "", "")
+        val active = synchronized(this) { activeDevice() }
         return try { block(active) } catch (rejected: DeviceRejectedException) {
-            val candidate = register()
-            // Candidate is local to this attempt: failure leaves memory and disk unchanged.
-            block(candidate).also { store()?.save(candidate.toJson()) }
+            synchronized(this) {
+                val latest=activeDevice()
+                if(latest!=active) block(latest) else {
+                    val candidate=register()
+                    block(candidate).also { store()?.save(candidate.toJson()) }
+                }
+            }
         }
     }
 

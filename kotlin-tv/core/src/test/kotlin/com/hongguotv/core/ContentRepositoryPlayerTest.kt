@@ -42,6 +42,18 @@ class ContentRepositoryPlayerTest {
     private fun entry(height: Int, codec: String, url: String, width: Int = 0) = JSONObject()
         .put("vheight", height).put("vwidth", width).put("codec_type", codec).put("main_url", url)
 
+    @Test fun failedEndpointsAndAutomaticRecoveryShareOneRequestCeiling() {
+        var requests=0
+        val (repo,_)=repository {requests++;"{}"}
+        val budget=PlaybackRequestBudget(5,0)
+        assertThrows(Exception::class.java) {repo.stream("123",480,budget)}
+        assertEquals(3,requests)
+        assertThrows(PlaybackBudgetExceededException::class.java) {repo.stream("123",480,budget)}
+        assertEquals(5,requests)
+        assertThrows(PlaybackBudgetExceededException::class.java) {repo.stream("123",480,budget)}
+        assertEquals(5,requests)
+    }
+
     @Test fun shortplayModelListResolvesWithoutAnyFallbackCall() {
         val (repo, _) = repository { request ->
             when (request.url.host) {

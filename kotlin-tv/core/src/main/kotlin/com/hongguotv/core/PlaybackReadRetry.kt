@@ -18,6 +18,7 @@ internal class PlaybackReadRetry(private val sleep: (Long)->Unit = Thread::sleep
                 val temporary=e is java.net.SocketTimeoutException || e is java.net.SocketException ||
                     e is java.net.UnknownHostException || (e is PlaybackHttpException && e.status in setOf(500,502,503,504))
                 if(attempt==2 || (!empty && (!temporary || transientRetried))) throw e
+                if(PlaybackRequestBudget.current.get()?.retry()==false) throw e
                 if(!empty) transientRetried=true
                 try { sleep(if(attempt==0) 700 else 1500) }
                 catch(e: InterruptedException) { Thread.currentThread().interrupt(); throw java.io.InterruptedIOException("请求已取消") }

@@ -26,6 +26,7 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 class DeviceIdentityRejectedException(message: String): IOException(message)
 
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, private val prepareIdentityRetry: (() -> Unit)? = null, private val commitIdentityRetry: (() -> Unit)? = null, private val rollbackIdentityRetry: (() -> Unit)? = null) {
+    private val modelHttp=http.newBuilder().retryOnConnectionFailure(false).build()
     private val signer = Signer()
     private val devices = PlayerDeviceSource(http)
     private val searchDevices = PlayerDeviceSource(http, store = { searchDeviceStore },
@@ -38,7 +39,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
         signed?.body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
-        return RequestScope.execute(http.newCall(request.build())) { response ->
+        PlaybackRequestBudget.current.get()?.request()
+        return RequestScope.execute((if(PlaybackRequestBudget.current.get()!=null) modelHttp else http).newCall(request.build())) { response ->
             if (!response.isSuccessful) {
                 val error = response.body?.string().orEmpty()
                 if (isIdentityRisk(response.code, error)) throw DeviceIdentityRejectedException("设备标识被拒绝（HTTP ${response.code}）")
@@ -184,12 +186,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
         return Detail(card(o).copy(id=id),episodes)
     }
-    fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
+    fun stream(id: String, maxQuality: Int = 1080, budget: PlaybackRequestBudget=PlaybackRequestBudget()): StreamInfo = budget.run { streamWithinBudget(id,maxQuality) }
+    private fun streamWithinBudget(id: String,maxQuality: Int): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
         if (deviceStore != null) {
             try { return devices.recover { device -> playerStream(id, maxQuality, device) } }
             catch (e: Exception) {
                 RequestScope.ensureActive()
+                if(e is PlaybackBudgetExceededException) throw e
                 // Keep the previous protocol as a fallback, but do not start a second
                 // random-identity rotation after the registered candidate failed.
                 return streamOnce(id, maxQuality)
@@ -221,10 +225,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                         val fallback = JSONObject(fetch(fallbackUrl, mapOf("User-Agent" to PlayerDeviceSource.FALLBACK_USER_AGENT, "Accept-Language" to "zh-CN,zh;q=0.9"), null))
                         val info = fallback.optJSONObject("video_info")?.optJSONObject("data")
                         rows += StreamModels.listRows(info?.optJSONObject("video_list"), info?.str("key_seed")?.takeIf { it.isNotEmpty() }?.let(StreamModels::lenientB64))
-                    }
+                    }.onFailure { if(it is PlaybackBudgetExceededException) throw it; RequestScope.ensureActive() }
                 }
             } catch (e: DeviceRejectedException) { rejected = true }
-            catch (e: Exception) { RequestScope.ensureActive(); transportFailure = e }
+            catch (e: Exception) { RequestScope.ensureActive(); if(e is PlaybackBudgetExceededException) throw e; transportFailure = e }
         }
         val chosen = StreamModels.pick(rows, maxQuality)
             ?: run {
@@ -239,7 +243,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val request = Request.Builder().url(url).header("Accept-Language", "zh-CN,zh;q=0.9")
         headers.forEach { (k, v) -> request.header(k, v) }
         body?.let { request.post(it.toRequestBody("application/json; charset=UTF-8".toMediaType())) }
-        return RequestScope.execute(http.newCall(request.build())) { response ->
+        PlaybackRequestBudget.current.get()?.request()
+        return RequestScope.execute((if(PlaybackRequestBudget.current.get()!=null) modelHttp else http).newCall(request.build())) { response ->
             if (response.code == 401 || response.code == 403) throw DeviceRejectedException("播放请求被拒绝（HTTP ${response.code}）")
             if (!response.isSuccessful) throw PlaybackHttpException(response.code)
             val bodyStream = response.body ?: throw IOException("内容响应为空")
