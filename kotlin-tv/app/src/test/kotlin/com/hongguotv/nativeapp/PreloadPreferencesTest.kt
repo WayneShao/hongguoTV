@@ -34,4 +34,14 @@ class PreloadPreferencesTest {
   tools.destroy();controller.pause().stop().destroy()
  }
 
+ @Test fun upgradingFromOldSettingsDisablesPreloadWithoutLosingParameters() {
+  val a=Robolectric.buildActivity(Activity::class.java).setup().get()
+  a.getSharedPreferences("preload-settings-v1",0).edit().clear().putString("mode","EPISODES")
+   .putInt("episodes",20).putInt("checkEpisodes",3).commit()
+  val prefs=PreloadPreferences(a);assertFalse(prefs.load().enabled);assertEquals(20,prefs.load().episodes)
+  prefs.save(prefs.load().copy(enabled=true));assertTrue(PreloadPreferences(a).load().enabled)
+  prefs.save(prefs.load().copy(enabled=false));assertFalse(PreloadPreferences(a).load().enabled)
+  assertEquals(20,prefs.load().episodes);assertEquals(3,prefs.load().checkEpisodes)
+ }
+
 }

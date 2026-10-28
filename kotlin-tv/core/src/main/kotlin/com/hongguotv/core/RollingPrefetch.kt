@@ -53,18 +53,22 @@ class RollingPrefetch<T: Closeable>(
     private val entries=linkedMapOf<String,Entry<T>>()
     private val failures=mutableMapOf<String,Pair<Int,Long>>()
     private var desired=emptyList<String>()
+    private var enabled=true
     private var timeTarget=horizonMs
     private var countTarget: Int?=null
     @Synchronized fun configure(config: PreloadSettings) {
+        enabled=config.enabled
+        if(!enabled) close()
         timeTarget=config.minutes*60_000L
         countTarget=if(config.mode==PreloadMode.EPISODES) config.episodes else null
     }
     @Synchronized fun update(keys: List<String>) {
-        desired=keys.distinct().take(countTarget ?: 100)
+        desired=if(enabled) keys.distinct().take(countTarget ?: 100) else emptyList()
         entries.keys.toList().filter { it !in desired }.forEach { entries.remove(it)?.task?.close() }
         failures.keys.retainAll(desired.toSet())
     }
     @Synchronized fun pump(): Boolean {
+        if(!enabled) return false
         val now=clock()
         entries.keys.toList().forEach { key ->
             val entry=entries.getValue(key)

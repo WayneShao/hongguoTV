@@ -47,9 +47,24 @@ class RollingPrefetchTest {
  }
  @Test fun episodeModeStopsAtCountEvenWhenDurationUnknown() {
   val cache=RollingPrefetch(direct,{ _,_,_ -> Item(0) },{null},{it.size},{0})
-  cache.configure(PreloadSettings(mode=PreloadMode.EPISODES,episodes=3))
+  cache.configure(PreloadSettings(mode=PreloadMode.EPISODES,episodes=3,enabled=true))
   cache.update((1..20).map(Int::toString));repeat(10){cache.pump()}
   assertEquals(3,cache.count());assertFalse(cache.pump());cache.close()
+ }
+
+ @Test fun disabledModeNeverStartsBackgroundLoads() {
+  var loads=0
+  val cache=RollingPrefetch(direct,{ _,_,_ -> loads++;Item(60) },{it.seconds*1000},{it.size},{0})
+  cache.configure(PreloadSettings(enabled=false));cache.update(listOf("1","2"))
+  repeat(5){assertFalse(cache.pump())};assertEquals(0,loads);assertNull(cache.claim("1"))
+ }
+ @Test fun turningOffClosesPendingCacheButNotAlreadyClaimedPlayback() {
+  val items=mutableListOf<Item>()
+  val cache=RollingPrefetch(direct,{ _,_,_ -> Item(60).also {items+=it} },{it.seconds*1000},{it.size},{0})
+  cache.update(listOf("1","2"));cache.pump();cache.pump()
+  val playing=cache.claim("1")!!.await()
+  cache.configure(PreloadSettings(enabled=false))
+  assertFalse(playing.closed);assertTrue(items[1].closed);assertEquals(0,cache.count());playing.close()
  }
 
 }
