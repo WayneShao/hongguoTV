@@ -45,3 +45,9 @@ refresh URLs/identities only when that layer's evidence supports doing so.
 
 Delivery: TV versionCode 16 / 0.9.7-local; both glasses versionCode 22 /
 0.9.7-rayneo-keyboard and 0.9.7-rayneo-full. Same names, packages and signatures.
+
+A further relevant fork update is evil1127/HGTV 41f18d0635 (official-patch hooks):
+reduce lookahead 3→2, wait four seconds after foreground network use, pause 300 ms
+between chunks, cool down speculative reads 120 seconds on 429 or 30 seconds on
+other failures, and skip warming current playback. These are design references,
+not a drop-in source patch or proof of the cause on the user's TV.
