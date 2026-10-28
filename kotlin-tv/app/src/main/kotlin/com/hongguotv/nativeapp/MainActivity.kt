@@ -782,17 +782,22 @@ class MainActivity: Activity() {
         right.forEachIndexed { i,v -> v.nextFocusLeftId=left[i].id; v.nextFocusRightId=v.id }
         val preloadGroup=column().apply { setPadding(dp(12),dp(12),dp(12),dp(4)) }
         parent.addView(preloadGroup)
-        heading(preloadGroup,"预加载","当前播放稳定后补充；时间和集数分别保存")
+        heading(preloadGroup,"预加载","关闭仅停止后台预下载，当前播放与失败重试保留")
+        lateinit var enabledButton: TextView
         lateinit var modeButton: TextView
         lateinit var thresholdButton: TextView
         lateinit var intervalButton: TextView
         fun refreshPreloadLabels() {
+            enabledButton.text="预加载开关  ·  ${if(preloadConfig.enabled) "开启" else "关闭"}"
             val timed=preloadConfig.mode==PreloadMode.TIME
             modeButton.text="预加载模式  ·  ${if(timed) "按时间" else "按集数"}"
             thresholdButton.text="预加载阈值  ·  ${if(timed) "${preloadConfig.minutes} 分钟" else "${preloadConfig.episodes} 集"}"
             intervalButton.text="检测频率  ·  ${if(timed) "每播放 ${preloadConfig.checkMinutes} 分钟" else "每播放 ${preloadConfig.checkEpisodes} 集"}"
         }
         fun savePreload(next: PreloadSettings) { preloadConfig=next.normalized(); preloadPreferences.save(preloadConfig); cancelPrefetch(); refreshPreloadLabels() }
+        enabledButton=setting(preloadGroup,"") {
+            savePreload(preloadConfig.copy(enabled=!preloadConfig.enabled))
+        }
         modeButton=setting(preloadGroup,"") {
             tvTools.chooseSelected("预加载模式",listOf("按时间","按集数"),preloadConfig.mode.ordinal,modeButton) {
                 savePreload(preloadConfig.copy(mode=PreloadMode.entries[it]))
@@ -815,13 +820,13 @@ class MainActivity: Activity() {
             }
         }
         refreshPreloadLabels()
-        val preloadButtons=listOf(modeButton,thresholdButton,intervalButton)
+        val preloadButtons=listOf(enabledButton,modeButton,thresholdButton,intervalButton)
         preloadButtons.forEachIndexed { index,v ->
             v.nextFocusUpId=preloadButtons.getOrNull(index-1)?.id ?: left.last().id
             v.nextFocusDownId=preloadButtons.getOrNull(index+1)?.id ?: v.id
             v.nextFocusLeftId=v.id; v.nextFocusRightId=v.id
         }
-        left.last().nextFocusDownId=modeButton.id; right.last().nextFocusDownId=modeButton.id
+        left.last().nextFocusDownId=enabledButton.id; right.last().nextFocusDownId=enabledButton.id
         nav.forEach { it.nextFocusDownId=accountEntry.id }; accountEntry.nextFocusUpId=nav[tab].id; accountEntry.nextFocusDownId=qualityButton.id
         parent.addView(text("红果TV  /  ${BuildConfig.VERSION_NAME}    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
         nav[tab].requestFocus()
@@ -931,8 +936,8 @@ class MainActivity: Activity() {
         if(screen!="player" || recovering) { preloadClock.reset(); preloadCycle=false }
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
         bufferingWatchdog.reset(); prefetchAllowed=false
-        val prefetched=if(!recovering) upcoming.claim("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
-        upcoming.update(data.episodes.drop(selectedIndex+1).map { "$it:${library.maxQuality}" })
+        val prefetched=if(preloadConfig.enabled && !recovering) upcoming.claim("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
+        if(preloadConfig.enabled) upcoming.update(data.episodes.drop(selectedIndex+1).map { "$it:${library.maxQuality}" }) else cancelPrefetch()
         saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
             cancelRecovery(); tvTools.close()
@@ -1037,9 +1042,10 @@ class MainActivity: Activity() {
         // Closing an idle TLS connection can write close_notify; keep it off the UI thread.
         networkCleanup.execute { http.dispatcher.cancelAll(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
     }
-    private fun cancelPrefetch() { prefetchAllowed=false; preloadCycle=false; preloadClock.reset(); upcoming.close() }
+    private fun cancelPrefetch() { prefetchAllowed=false; preloadCycle=false; preloadClock.reset(); upcoming.close(); upcoming.configure(preloadConfig) }
     private fun maybePrefetch() {
         prefetchAllowed=false
+        if(!preloadConfig.enabled) { cancelPrefetch(); return }
         val p=player ?: return; val data=detail ?: return
         val now=android.os.SystemClock.elapsedRealtime()
         preloadClock.sample(now,foreground && p.isPlaying,p.playbackParameters.speed)
