@@ -77,8 +77,7 @@ class MainActivity: Activity() {
     private var preloadConfig=PreloadSettings()
     private val preloadClock=PreloadCheckClock()
     private var preloadCycle=false
-    private val preloadGate=PreloadGate { android.os.SystemClock.elapsedRealtime() }.apply { onDemand={ backgroundVideo?.yieldToForeground() } }
-    @Volatile private var backgroundVideo: RemoteVideo?=null
+    private val preloadGate=PreloadGate { android.os.SystemClock.elapsedRealtime() }
     private var episodeRequestBudget=PlaybackRequestBudget()
     private val prefetchWorker=Executors.newSingleThreadExecutor()
     private val prefetchHttp by lazy { repository.http.newBuilder()
@@ -86,23 +85,9 @@ class MainActivity: Activity() {
     private val prefetchDirectory by lazy { java.io.File(cacheDir,"episode-prefetch").also { dir ->
         dir.mkdirs(); dir.listFiles()?.filter { it.name.startsWith("hongguo-prefetch-") && it.extension=="part" }?.forEach { it.delete() }
     } }
-    private val upcoming by lazy { RollingPrefetch<RemoteVideo>(prefetchWorker,
-        load={ key,claimed,budget ->
-            val id=key.substringBefore(':'); val cap=key.substringAfter(':').toInt()
-            preloadGate.await(claimed)
-            try {
-                val remote=RemoteVideo(prefetchHttp,repository.stream(id,cap,PlaybackRequestBudget(4,1)),preloadGate,background=true)
-                backgroundVideo=remote
-                var failures=0
-                try { preloadGate.await(claimed); remote.prepare(); remote.preload(prefetchDirectory,{
-                    preloadGate.await(claimed); claimed()
-                },budget) { error -> preloadGate.failed(error); ++failures<2 } }
-                catch(e: Exception) { remote.close(); throw e }
-                finally { backgroundVideo=null }
-            } catch(e: Exception) { preloadGate.failed(e); throw e }
-
-        }, duration={ if(it.cachedSize()>=it.total) it.durationMs() else null },
-        bytes={ it.cachedSize() }, clock={ android.os.SystemClock.elapsedRealtime() }, memory={it.retainedBytes()}) }
+    private val upcoming by lazy { EpisodePreloader(prefetchWorker,prefetchHttp,{prefetchDirectory},
+        resolve={key -> repository.stream(key.substringBefore(':'),key.substringAfter(':').toInt(),PlaybackRequestBudget(8,2))},
+        gate=preloadGate,clock={android.os.SystemClock.elapsedRealtime()}) }
     private var playbackPreparation: PendingPreparation<RemoteVideo>?=null
     private var playbackHttp: okhttp3.OkHttpClient?=null
     private var readySince=0L
@@ -961,8 +946,8 @@ class MainActivity: Activity() {
         library.setWatched(data.series.id,false)
         if(screen!="player" || recovering) { preloadClock.reset(); preloadCycle=false }
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
-        bufferingWatchdog.reset(); preloadGate.update(false,0,0); backgroundVideo?.yieldToForeground()
         val prefetched=if(preloadConfig.enabled && !recovering) upcoming.claim("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
+        bufferingWatchdog.reset(); preloadGate.update(false,0,0); upcoming.yieldToForeground()
         if(preloadConfig.enabled) upcoming.update(data.episodes.drop(selectedIndex+1).map { "$it:${library.maxQuality}" }) else cancelPrefetch()
         saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
         if(reuse) {
@@ -1006,7 +991,7 @@ class MainActivity: Activity() {
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
         val requestBudget=episodeRequestBudget
         work({
-            val cached=if(prefetched!=null) try { prefetched.await() } catch(e: Exception) {
+            val cached=if(prefetched!=null) try { prefetched.await(1500) } catch(e: Exception) {
                 RequestScope.ensureActive(); null
             } finally { prefetched.close() } else null
             cached?.also { it.promote() } ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,requestBudget),preloadGate).let {
@@ -1111,7 +1096,7 @@ class MainActivity: Activity() {
             else -> "播放请求失败，请检查网络或稍后重试"
         }
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
-        saveProgress(); cancelRecovery(); preloadGate.update(false,0,0); preloadGate.failed(problem); backgroundVideo?.yieldToForeground()
+        saveProgress(); cancelRecovery(); preloadGate.update(false,0,0); preloadGate.failed(problem); upcoming.yieldToForeground()
         if(PlaybackRecoveryPolicy.needsNewAddress(problem)) { video?.close(); video=null } else video?.cancelReads()
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
         val decoding=problem is PlaybackException && problem.errorCode in 3000..4999

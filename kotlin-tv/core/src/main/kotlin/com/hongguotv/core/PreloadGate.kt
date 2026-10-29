@@ -12,11 +12,18 @@ class PreloadGate(private val clock: ()->Long={System.nanoTime()/1_000_000}) {
     private var cooldown=0L
     private var chunkReady=0L
     @Volatile var onDemand: ()->Unit={}
-    @Synchronized fun update(active: Boolean,bufferMs: Long,remainingMs: Long) {
-        playing=active
-        val remaining=remainingMs.coerceAtLeast(1)
-        if(!active || bufferMs<minOf(8000,remaining)) high=false
-        else if(bufferMs>=minOf(20000,remaining)) high=true
+    fun update(active: Boolean,bufferMs: Long,remainingMs: Long) {
+        val revoked=synchronized(this) {
+            val permitted=playing && high
+            playing=active
+            val remaining=remainingMs.coerceAtLeast(1)
+            if(!active || bufferMs<minOf(8000,remaining)) high=false
+            else if(bufferMs>=minOf(20000,remaining)) high=true
+            permitted && !(playing && high)
+        }
+        // Never call a RemoteVideo while holding the gate: call registration checks
+        // allowed() under its own lock, so invoking here would invert that order.
+        if(revoked) onDemand()
     }
     fun networkStarted() { synchronized(this) {readers++;lastRead=clock()};onDemand() }
     @Synchronized fun networkFinished() { readers=(readers-1).coerceAtLeast(0);lastRead=clock() }

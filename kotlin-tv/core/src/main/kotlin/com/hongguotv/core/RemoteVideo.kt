@@ -15,13 +15,20 @@ import okhttp3.Response
 class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
     private val traffic: PreloadGate?=null, background: Boolean=false) : Closeable {
     @Volatile private var background=background
+    @Volatile private var promoted=false
+    @Volatile private var consecutivePreloadFailures=0
     private val preempted=java.util.concurrent.atomic.AtomicBoolean(false)
     private val delivered=java.util.concurrent.atomic.AtomicLong()
     val deliveredBytes get()=delivered.get()
     val reusable get()=!closed
-    fun promote() {background=false}
+    fun promote() { synchronized(calls) {
+        promoted=true
+        if(background) { background=false; preempted.set(true); calls.toList().forEach {it.cancel()} }
+    } }
     fun cancelReads() { synchronized(calls) {calls.toList().forEach {it.cancel()}} }
-    fun yieldToForeground() { if(background) {preempted.set(true);cancelReads()} }
+    fun yieldToForeground() { synchronized(calls) {
+        if(background) {preempted.set(true);calls.toList().forEach {it.cancel()}}
+    } }
     private val streamingHttp=http.newBuilder().callTimeout(0,java.util.concurrent.TimeUnit.MILLISECONDS)
         .readTimeout(minOf(http.readTimeoutMillis.takeIf {it>0} ?: 15000,15000).toLong(),java.util.concurrent.TimeUnit.MILLISECONDS)
         .retryOnConnectionFailure(false).build()
@@ -34,16 +41,24 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
     @Volatile private var closed = false
     private val calls = mutableSetOf<Call>()
     private val diskLock=Any()
+    private val preloadLock=Any()
+    @Volatile private var cacheEligible=true
+    fun canResumePreload()=cacheEligible && !promoted && !closed && consecutivePreloadFailures<3 && total>cachedSize()
     private var cachedFile: java.io.File?=null
     @Volatile private var diskBytes=0L
     fun durationMs(): Long? = if(::prepared.isInitialized) Mp4Duration.read(prepared.header) else null
     fun cachedSize(): Long = maxOf(prefix.size.toLong(),diskBytes)
     /** Cache original encrypted bytes in disposable app cache, never a second decoded video. */
-    fun preload(directory: java.io.File, claimed: ()->Boolean, budget: Long = 64L*1024*1024, onFailure: (Exception)->Boolean={false}): RemoteVideo {
+    fun preload(directory: java.io.File, claimed: ()->Boolean, budget: Long = 64L*1024*1024, onFailure: (Exception)->Boolean={false}): RemoteVideo = synchronized(preloadLock) {
+        synchronized(calls) {
+            if(promoted) return this
+            background=true
+        }
         prepare()
-        if(total>minOf(budget,64L*1024*1024) || claimed()) return this
+        if(claimed() || !background) return this
+        if(total>minOf(budget,64L*1024*1024)) { cacheEligible=false; return this }
         directory.mkdirs()
-        if(total>directory.usableSpace-16L*1024*1024) return this
+        if(total-cachedSize()>directory.usableSpace-16L*1024*1024) { cacheEligible=false; return this }
         val file=cachedFile ?: java.io.File.createTempFile("hongguo-prefetch-", ".part", directory)
         synchronized(diskLock) {
             if(closed) { file.delete(); throw IOException("播放请求已取消") }
@@ -54,23 +69,29 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
             }
         }
         try {
-            while(diskBytes<total && !claimed()) {
+            while(diskBytes<total && !claimed() && background) {
+                traffic?.await { claimed() || !background }
+                if(claimed() || !background) return this
                 val start=diskBytes
                 val bytes=try {
                     preempted.set(false)
-                    range(start,minOf(total-1,start+256*1024-1)).bytes
+                    range(start,minOf(total-1,start+256*1024-1),backgroundOnly=true).bytes
                 } catch(e: Exception) {
                     RequestScope.ensureActive()
                     if(closed) throw e
+                    if(claimed() || !background) return this
+                    if(e is PreloadYieldException) continue
                     if(preempted.getAndSet(false)) continue
                     if(e is VideoResourceChangedException) throw e
-                    if(onFailure(e)) continue
+                    consecutivePreloadFailures++
+                    if(onFailure(e) && consecutivePreloadFailures<3) continue
                     return this // Keep verified bytes; foreground can continue the remainder.
                 }
                 synchronized(diskLock) {
                     if(closed) throw IOException("播放请求已取消")
                     java.io.RandomAccessFile(file,"rw").use { it.seek(start); it.write(bytes) }
                     diskBytes+=bytes.size
+                    consecutivePreloadFailures=0
                 }
                 traffic?.chunkFinished()
             }
@@ -87,7 +108,8 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
     private lateinit var prepared: MediaCrypto.Prepared
     @Volatile private var prefix = byteArrayOf()
 
-    private fun newCall(start: Long, end: Long, streaming: Boolean=false): Call {
+    private class PreloadYieldException: IOException("前台读取优先")
+    private fun newCall(start: Long, end: Long, streaming: Boolean=false, backgroundOnly: Boolean=false): Call {
         if (closed) throw IOException("播放请求已取消")
         require(start >= 0 && end >= start && end - start < 8 * 1024 * 1024)
         val request =
@@ -105,6 +127,7 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
         else call.timeout().timeout(if(background) 18 else 30, java.util.concurrent.TimeUnit.SECONDS)
         synchronized(calls) {
             if (closed) throw IOException("播放请求已取消")
+            if(backgroundOnly && (!background || traffic?.allowed()==false)) throw PreloadYieldException()
             calls += call
         }
         return call
@@ -125,8 +148,8 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
         return (last - start + 1).toInt() to full
     }
 
-    private fun range(start: Long, end: Long): Range {
-        val call = newCall(start, end)
+    private fun range(start: Long, end: Long, backgroundOnly: Boolean=false): Range {
+        val call = newCall(start, end,backgroundOnly=backgroundOnly)
         try {
             return demand { RequestScope.execute(call) { response ->
                 val (n, full) = rangeSize(response, start, end)
