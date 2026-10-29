@@ -19,25 +19,52 @@ internal class PlayerDeviceSource(
     private val registrar: DeviceRegistrar = DeviceRegistrar(),
     private val store: () -> PlayerDeviceStore? = { ContentRepository.deviceStore },
     private val register: () -> PlayerDevice = { registrar.register(http) },
+    private val recoverEmpty: Boolean = false,
+    private val cooldownMillis: Long = 300_000,
+    private val monotonicMillis: () -> Long = { System.nanoTime() / 1_000_000 },
 ) {
     private fun activeDevice(): PlayerDevice {
         val saved=store()?.load()?.let(PlayerDevice::fromJson)
         return saved ?: PlayerDevice(VendorConstants.device.getValue("device_id"),VendorConstants.device.getValue("iid"),"","","")
     }
+    private class RecoveryState {
+        val lock = java.util.concurrent.locks.ReentrantLock()
+        var lastAttempt: Long? = null
+    }
+    private fun recoveryState(): RecoveryState = synchronized(recoveryStates) {
+        recoveryStates.getOrPut(store() ?: this) { RecoveryState() }
+    }
     fun <T> recover(block: (PlayerDevice) -> T): T {
-        val active = synchronized(this) { activeDevice() }
-        return try { block(active) } catch (rejected: DeviceRejectedException) {
-            synchronized(this) {
-                val latest=activeDevice()
-                if(latest!=active) block(latest) else {
-                    val candidate=register()
-                    block(candidate).also { store()?.save(candidate.toJson()) }
-                }
+        // Ordinary reads never wait behind a slow candidate validation.
+        val active = activeDevice()
+        return try { block(active) } catch (failure: Exception) {
+            if (failure !is DeviceRejectedException && !(recoverEmpty && failure is EmptyPlaybackException)) throw failure
+            val state = recoveryState()
+            try {
+                while (!state.lock.tryLock(100, java.util.concurrent.TimeUnit.MILLISECONDS)) RequestScope.ensureActive()
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw java.io.InterruptedIOException("请求已取消")
             }
+            try {
+                RequestScope.ensureActive()
+                val latest = activeDevice()
+                if (latest != active) return block(latest)
+                val now = monotonicMillis()
+                if (state.lastAttempt?.let { now - it < cooldownMillis } == true) throw failure
+                // Failed registration/validation also consumes the cooldown.
+                state.lastAttempt = now
+                val candidate = register()
+                block(candidate).also {
+                    RequestScope.ensureActive()
+                    store()?.save(candidate.toJson())
+                }
+            } finally { state.lock.unlock() }
         }
     }
 
     companion object {
+        private val recoveryStates = java.util.WeakHashMap<Any, RecoveryState>()
         // The shortplay video_model URL from fetchShortplayVideoModel.
         internal const val SHORTPLAY_URL = "https://api3-normal-sinfonlinea.fqnovel.com/novel/player/video_model/v1/?iid={install_id}&device_id={device_id}&aid=1967&app_name=novelapp&version_code=72132&version_name=7.2.1.32&device_platform=android&device_brand=Xiaomi&os_version=13&cdid={cdid}"
         // The phoenix multi_video_model URL from phoenix_player_url.
@@ -151,14 +178,12 @@ internal object StreamModels {
     fun spadeDecrypt(value: String, keySeed: ByteArray): String? =
         runCatching { MediaCrypto.decryptUrl(value, keySeed) }.getOrNull()
 
-    /** Every video_model map in a model response, object- or string-shaped. */
-    fun models(data: JSONObject): List<JSONObject> {
-        val out = mutableListOf<JSONObject>()
-        decodeModel(data.opt("video_model"))?.let { out += it }
-        data.keys().asSequence().forEach { key ->
-            data.optJSONObject(key)?.let { decodeModel(it.opt("video_model"))?.let { model -> out += model } }
-        }
-        return out
+    /** Batch keys identify episodes. model.video_id is a different, opaque media ID. */
+    fun models(data: JSONObject, episodeId: String, allowDirect: Boolean): List<JSONObject> {
+        val entry = data.optJSONObject(episodeId)
+            ?: if (allowDirect && data.has("video_model")) data else return emptyList()
+        val model = decodeModel(entry.opt("video_model")) ?: return emptyList()
+        return listOf(model)
     }
     private fun decodeModel(value: Any?): JSONObject? = when (value) {
         is JSONObject -> value

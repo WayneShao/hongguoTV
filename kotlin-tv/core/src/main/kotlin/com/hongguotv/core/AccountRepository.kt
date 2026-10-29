@@ -393,9 +393,9 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
             data.optJSONArray(key)?.let { return it.objects() }
             data.optJSONObject(key)?.let { holder ->
                 val nested=holder.optJSONArray("list") ?: holder.optJSONArray("items") ?: holder.optJSONArray("data_list")
-                if(nested!=null) return@let nested.objects()
-                if(firstText(holder,"book_id","series_id","item_id","id").isNotBlank()) return@let listOf(holder)
-                if(holder.length()>0) return@let holder.keys().asSequence().mapNotNull { holder.optJSONObject(it) }.toList()
+                if(nested!=null) return nested.objects()
+                if(firstText(holder,"book_id","series_id","item_id","id").isNotBlank()) return listOf(holder)
+                if(holder.length()>0) return holder.keys().asSequence().mapNotNull { holder.optJSONObject(it) }.toList()
             }
         }
         return emptyList()

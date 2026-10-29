@@ -191,4 +191,11 @@ class AccountTest {
         assertFalse(error.message.orEmpty().contains("session-secret"))
         assertFalse(error.message.orEmpty().contains("token-secret"))
     }
+    @Test fun favoritesAcceptNestedListSingleRowAndMapShapes() {
+        val row=JSONObject().put("book_id","333").put("book_name","Shelf")
+        for(holder in listOf(JSONObject().put("list",org.json.JSONArray().put(row)),row,JSONObject().put("333",row))) {
+            val repo=repository { request -> response(request,JSONObject().put("code",0).put("data",JSONObject().put("video_shelf_info",holder)).toString()) }
+            assertEquals(listOf("333"),repo.accountFavorites().items.map { it.id })
+        }
+    }
 }

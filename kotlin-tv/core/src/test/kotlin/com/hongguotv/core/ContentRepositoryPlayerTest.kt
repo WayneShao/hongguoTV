@@ -44,7 +44,7 @@ class ContentRepositoryPlayerTest {
 
     @Test fun failedEndpointsAndAutomaticRecoveryShareOneRequestCeiling() {
         var requests=0
-        val (repo,_)=repository {requests++;"{}"}
+        val (repo,_)=repository { request -> if(request.url.host.endsWith("fqnovel.com")) requests++;"{}" }
         val budget=PlaybackRequestBudget(5,0)
         assertThrows(Exception::class.java) {repo.stream("123",480,budget)}
         assertEquals(3,requests)
@@ -172,5 +172,107 @@ class ContentRepositoryPlayerTest {
             }
         }
         assertEquals("https://example.com/spade.mp4", repo.stream("123", 1080).url)
+    }
+    @Test fun batchNeverSelectsNeighborEpisode() {
+        val (repo, _) = repository { request ->
+            if (request.url.host.endsWith("fqnovel.com"))
+                """{"code":0,"data":{"999":{"video_model":{"video_list":{"v":{"vheight":720,"codec_type":"h264","main_url":"https://example.com/wrong"}}}}}}"""
+            else "{}"
+        }
+        assertThrows(IOException::class.java) { repo.stream("123",720) }
+    }
+
+    @Test fun supportedRequestedQualitySkipsFallbackAndSecondModel() {
+        val calls = mutableListOf<String>()
+        val (repo, _) = repository { request ->
+            calls += request.url.toString()
+            """{"code":0,"data":{"video_model":{"video_list":{"v":{"vheight":720,"codec_type":"h264","main_url":"https://example.com/right"}},"fallback_api":"https://example.com/unnecessary"}}}"""
+        }
+        assertEquals("https://example.com/right",repo.stream("123",720).url)
+        assertEquals(1,calls.size)
+    }
+    @Test fun finalEmptyBodyRegistersCandidateAndValidatesSameEpisodeBeforeSaving() = verifyEmptyRecovery("")
+    @Test fun finalEmptyModelRegistersCandidateAndValidatesSameEpisodeBeforeSaving() = verifyEmptyRecovery("""{"code":0,"data":{"123":{"video_model":{}}}}""")
+    private fun verifyEmptyRecovery(emptyResponse: String) {
+        var registrations=0
+        var modelCalls=0
+        val (repo, store)=repository { request ->
+            when {
+                request.url.encodedPath.contains("device_register") -> { registrations++; """{"device_id":"789","install_id":"987"}""" }
+                request.url.host.endsWith("fqnovel.com") -> {
+                    modelCalls++
+                    if(request.url.queryParameter("device_id")=="789") {
+                        assertEquals(deviceJson,ContentRepository.deviceStore!!.load())
+                        val buffer=okio.Buffer();request.body!!.writeTo(buffer)
+                        assertTrue(buffer.readUtf8().contains("123"))
+                        """{"code":0,"data":{"video_model":{"video_list":{"v":{"vheight":720,"codec_type":"h264","main_url":"https://example.com/recovered"}}}}}"""
+                    } else emptyResponse
+                }
+                else -> "{}"
+            }
+        }
+        assertEquals("https://example.com/recovered",repo.stream("123",720).url)
+        assertEquals(1,registrations)
+        assertEquals("789",PlayerDevice.fromJson(store.value!!)!!.deviceId)
+        assertTrue(modelCalls<=8)
+    }
+    @Test fun emptyAndTransportOrMalformedOrUnsupportedNeverRotate() {
+        for(other in listOf("timeout","{broken", "unsupported")) {
+            var registrations=0
+            val (repo,store)=repository { request ->
+                when {
+                    request.url.encodedPath.contains("device_register") -> { registrations++; "{}" }
+                    request.url.host.startsWith("api3-") -> ""
+                    request.url.host.startsWith("api5-") -> when(other) {
+                        "timeout" -> throw java.net.SocketTimeoutException("offline")
+                        "unsupported" -> """{"code":0,"data":{"123":{"video_model":{"video_list":{"v":{"vheight":720,"codec_type":"bytevc2","main_url":"https://example.com/unsupported"}}}}}}"""
+                        else -> other
+                    }
+                    else -> "{}"
+                }
+            }
+            assertThrows(Exception::class.java) { repo.stream("123",720) }
+            assertEquals(other,0,registrations)
+            assertEquals(deviceJson,store.value)
+        }
+    }
+    @Test fun opaqueMediaIdsAreNotComparedWithRequestedEpisodeId() {
+        val mediaId="v02ebeg10000dbau7s7og65vmnnbq65g"
+        for(legacy in listOf(false,true)) {
+            val (repo,_)=repository { request ->
+                when {
+                    request.url.encodedPath.contains("preload") || (!legacy && request.url.host.startsWith("api5-")) -> {
+                        val model=JSONObject().put("video_id",mediaId).put("fallback_api","https://example.com/legacy")
+                        if(!legacy) model.put("video_list",list(entry(720,"h264","https://example.com/right")))
+                        JSONObject().put("code",0).put("data",JSONObject().put("123",JSONObject().put("video_model",model))).toString()
+                    }
+                    request.url.host=="example.com" -> {
+                        val info=JSONObject().put("video_id",mediaId).put("video_list",list(entry(720,"h264","https://example.com/right")))
+                        JSONObject().put("video_info",JSONObject().put("data",info)).toString()
+                    }
+                    else -> "{malformed"
+                }
+            }
+            assertEquals("https://example.com/right",repo.stream("123",720).url)
+        }
+    }
+
+    @Test fun legacyBatchRequiresRequestedEpisodeKey() {
+        val (repo,_)=repository { request ->
+            if(request.url.encodedPath.contains("preload"))
+                """{"code":0,"data":{"999":{"video_model":{"fallback_api":"https://example.com/wrong"}}}}"""
+            else "{malformed"
+        }
+        assertThrows(IOException::class.java) { repo.stream("123",720) }
+    }
+
+    @Test fun malformedStatusIsNotAnEmptyIdentityResponse() {
+        var registrations=0
+        val (repo,_)=repository { request ->
+            if(request.url.encodedPath.contains("device_register")) { registrations++; "{}" }
+            else """{"code":"garbage","data":{}}"""
+        }
+        assertThrows(Exception::class.java) { repo.stream("123",720) }
+        assertEquals(0,registrations)
     }
 }
