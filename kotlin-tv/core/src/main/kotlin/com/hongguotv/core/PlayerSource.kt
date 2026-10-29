@@ -125,15 +125,23 @@ internal object StreamModels {
     }
 
     /** One video_list entry into a playable (url, key) pair; empty url on failure. */
-    fun decryptEntry(info: JSONObject, keySeed: ByteArray?): PlayerVariant? {
+    fun decryptEntry(raw: JSONObject, keySeed: ByteArray?): PlayerVariant? {
+        // New model arrays keep size/codec in video_meta and content keys in encrypt_info.
+        val info=JSONObject(raw.toString())
+        raw.optJSONObject("video_meta")?.let { meta ->
+            for(name in meta.keys()) if(!info.has(name) || info.isNull(name) || info.optString(name).isBlank()) info.put(name,meta.get(name))
+        }
+        val encryption=raw.optJSONObject("encrypt_info")
+        val spade=info.str("spade_a").ifEmpty { encryption?.str("spade_a").orEmpty() }
+        val key=spade.takeIf { it.isNotEmpty() }?.let { runCatching { MediaCrypto.deriveKey(it) }.getOrNull() }
+        if((spade.isNotEmpty() || encryption?.optBoolean("encrypt",false)==true) && key==null) return null
         val score = qualityScore(info) ?: return null
-        var rawUrl = info.str("main_url").ifEmpty { info.str("backup_url_1") }
+        var rawUrl = info.str("main_url").ifEmpty { info.str("play_url") }.ifEmpty { info.str("backup_url_1") }
         if (rawUrl.isNotEmpty() && !rawUrl.startsWith("http")) {
             lenientB64(rawUrl)?.takeIf { it.size > 4 && it.startsWithHttp() }?.let { rawUrl = String(it, Charsets.UTF_8) }
         }
         val url = if (keySeed != null) spadeDecrypt(rawUrl, keySeed) ?: rawUrl else rawUrl
         if (!url.startsWith("http")) return null
-        val key = info.str("spade_a").takeIf { it.isNotEmpty() }?.let { runCatching { MediaCrypto.deriveKey(it) }.getOrNull() }
         return PlayerVariant(score, cleanUrl(url), key, displayName(int64FromAny(info, "vwidth"), int64FromAny(info, "vheight")))
     }
 
@@ -165,16 +173,10 @@ internal object StreamModels {
     fun listRows(videoList: JSONObject?, keySeed: ByteArray?): List<PlayerVariant> =
         videoList?.keys()?.asSequence()?.mapNotNull { videoList.optJSONObject(it) }?.mapNotNull { decryptEntry(it, keySeed) }?.toList() ?: emptyList()
 
-    /** Rows from an array-shaped legacy video_list (play_url / main_url, no spade). */
-    fun arrayRows(videoList: JSONArray?): List<PlayerVariant> {
-        if (videoList == null) return emptyList()
-        return (0 until videoList.length()).mapNotNull { videoList.optJSONObject(it) }.mapNotNull { info ->
-            val score = qualityScore(info) ?: return@mapNotNull null
-            val url = cleanUrl(info.str("play_url").ifEmpty { info.str("main_url") })
-            if (!url.startsWith("http")) return@mapNotNull null
-            PlayerVariant(score, url, null, displayName(int64FromAny(info, "vwidth"), int64FromAny(info, "vheight")))
-        }
-    }
+    /** Both model shapes share codec, resolution and encryption validation. */
+    fun arrayRows(videoList: JSONArray?): List<PlayerVariant> =
+        if(videoList==null) emptyList() else (0 until videoList.length())
+            .mapNotNull { videoList.optJSONObject(it) }.mapNotNull { decryptEntry(it,null) }
 
     /** The model's fallback_api URL, audio-encrypt stream parameters stripped. */
     fun fallbackApiUrl(model: JSONObject): String {
