@@ -1,0 +1,198 @@
+{
+  "structuralAssertionsPassed": true,
+  "measurement": "VideoFrameMetadataListener releaseTimeNs; PTS reset identifies next episode; not physical panel",
+  "model": "sdk_gphone_x86_64",
+  "api": 30,
+  "baseline": {
+    "audioTrackConfigurations": [
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      },
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      }
+    ],
+    "forcedAsyncCodec": false,
+    "minPcmBufferOverrideMs": 0,
+    "transitions": 20,
+    "minMs": 96.930765,
+    "medianMs": 113.84672900000001,
+    "p95Ms": 136.488069,
+    "maxMs": 156.592773,
+    "bufferingEvents": 21,
+    "decoderInitializations": 1,
+    "decoders": [
+      {
+        "name": "OMX.google.hevc.decoder",
+        "initMs": 21
+      }
+    ],
+    "droppedFrames": 0,
+    "audioUnderruns": 0,
+    "renderedFrames": 1890,
+    "closedSources": 21,
+    "remainingCacheFiles": 0
+  },
+  "queue": {
+    "audioTrackConfigurations": [
+      {
+        "sampleRate": 44100,
+        "encoding": 2,
+        "channelConfig": 12,
+        "bufferSizeBytes": 44100
+      }
+    ],
+    "forcedAsyncCodec": false,
+    "minPcmBufferOverrideMs": 0,
+    "transitions": 20,
+    "minMs": 33.33333,
+    "medianMs": 33.33333,
+    "p95Ms": 33.371743,
+    "maxMs": 49.999995,
+    "bufferingEvents": 1,
+    "decoderInitializations": 1,
+    "decoders": [
+      {
+        "name": "OMX.google.hevc.decoder",
+        "initMs": 10
+      }
+    ],
+    "droppedFrames": 0,
+    "audioUnderruns": 0,
+    "renderedFrames": 1890,
+    "closedSources": 21,
+    "remainingCacheFiles": 0
+  },
+  "queueZeroUnderrunsAndDrops": true,
+  "hostEmulator": {
+    "maxWorkingSetMiB": 3690.22265625,
+    "maxPrivateMiB": 4188.375,
+    "cpuSeconds": 194.90625,
+    "samples": 28
+  },
+  "appMemory": {
+    "minPssKiB": 95844,
+    "maxPssKiB": 105217,
+    "samples": 27
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "scenario": "main-disable",
+  "events": [],
+  "priorInterruptedRunFiles": 0,
+  "prefilledCount": 3,
+  "prefilledBytes": 805825,
+  "disabledPreloadCurrentContinues": true,
+  "releasedNextPin": true,
+  "completedEpisodes": [],
+  "finalEpisodeIndex": 0,
+  "playerRetained": true,
+  "autoTransitions": 0,
+  "passed": true,
+  "activityDestroyed": true,
+  "remainingCacheFiles": 0
+}

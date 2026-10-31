@@ -1,0 +1,58 @@
+{
+  "structuralAssertionsPassed": true,
+  "measurement": "VideoFrameMetadataListener releaseTimeNs; PTS reset identifies next episode; not physical panel",
+  "model": "sdk_gphone_x86_64",
+  "api": 30,
+  "baseline": {
+    "transitions": 20,
+    "minMs": 92.642847,
+    "medianMs": 118.5019695,
+    "p95Ms": 135.002798,
+    "maxMs": 155.804973,
+    "bufferingEvents": 21,
+    "decoderInitializations": 1,
+    "decoders": [
+      {
+        "name": "OMX.google.hevc.decoder",
+        "initMs": 19
+      }
+    ],
+    "droppedFrames": 0,
+    "audioUnderruns": 0,
+    "renderedFrames": 1890,
+    "closedSources": 21,
+    "remainingCacheFiles": 0
+  },
+  "queue": {
+    "transitions": 20,
+    "minMs": 33.33333,
+    "medianMs": 33.33333,
+    "p95Ms": 49.999995,
+    "maxMs": 49.999995,
+    "bufferingEvents": 1,
+    "decoderInitializations": 1,
+    "decoders": [
+      {
+        "name": "OMX.google.hevc.decoder",
+        "initMs": 9
+      }
+    ],
+    "droppedFrames": 0,
+    "audioUnderruns": 6,
+    "renderedFrames": 1890,
+    "closedSources": 21,
+    "remainingCacheFiles": 0
+  },
+  "queueZeroUnderrunsAndDrops": false,
+  "hostEmulator": {
+    "maxWorkingSetMiB": 3720.1953125,
+    "maxPrivateMiB": 4176.265625,
+    "cpuSeconds": 192.96875,
+    "samples": 29
+  },
+  "appMemory": {
+    "minPssKiB": 110910,
+    "maxPssKiB": 115485,
+    "samples": 28
+  }
+}

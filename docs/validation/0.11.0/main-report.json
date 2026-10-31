@@ -1,0 +1,37 @@
+{
+  "scenario": "main",
+  "events": [
+    {
+      "index": 1,
+      "mediaId": "990000002",
+      "title": "Local seamless regression  ·  第 2 集",
+      "positionMs": 40,
+      "queueIds": [
+        "990000002"
+      ]
+    },
+    {
+      "index": 2,
+      "mediaId": "990000003",
+      "title": "Local seamless regression  ·  第 3 集",
+      "positionMs": 27,
+      "queueIds": [
+        "990000003"
+      ]
+    }
+  ],
+  "priorInterruptedRunFiles": 0,
+  "prefilledCount": 3,
+  "prefilledBytes": 805825,
+  "completedEpisodes": [
+    "990000001",
+    "990000002",
+    "990000003"
+  ],
+  "finalEpisodeIndex": 2,
+  "playerRetained": true,
+  "autoTransitions": 2,
+  "passed": true,
+  "activityDestroyed": true,
+  "remainingCacheFiles": 0
+}

@@ -1,0 +1,25 @@
+{
+  "scenario": "main-manual",
+  "events": [
+    {
+      "index": 1,
+      "mediaId": "990000002",
+      "title": "Local seamless regression  ·  第 2 集",
+      "positionMs": 0,
+      "queueIds": [
+        "990000002"
+      ]
+    }
+  ],
+  "priorInterruptedRunFiles": 0,
+  "prefilledCount": 3,
+  "prefilledBytes": 805825,
+  "manualSkipPreservedTimer": true,
+  "completedEpisodes": [],
+  "finalEpisodeIndex": 1,
+  "playerRetained": true,
+  "autoTransitions": 0,
+  "passed": true,
+  "activityDestroyed": true,
+  "remainingCacheFiles": 0
+}

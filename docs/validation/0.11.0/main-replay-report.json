@@ -1,0 +1,19 @@
+{
+  "scenario": "main-replay",
+  "events": [],
+  "priorInterruptedRunFiles": 0,
+  "prefilledCount": 3,
+  "prefilledBytes": 805825,
+  "timerStoppedBeforeNext": true,
+  "replayCompletionReset": true,
+  "replayedEpisodeCountedAgain": true,
+  "completedEpisodes": [
+    "990000001"
+  ],
+  "finalEpisodeIndex": 0,
+  "playerRetained": true,
+  "autoTransitions": 0,
+  "passed": true,
+  "activityDestroyed": true,
+  "remainingCacheFiles": 0
+}
