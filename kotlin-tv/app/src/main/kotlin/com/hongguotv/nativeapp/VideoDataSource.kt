@@ -10,7 +10,7 @@ import androidx.media3.datasource.DataSpec
 import com.hongguotv.core.RemoteVideo
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-class VideoDataSource(private val video: RemoteVideo) : BaseDataSource(true) {
+class VideoDataSource(private val video: RemoteVideo, private val cacheOnly: Boolean = false) : BaseDataSource(!cacheOnly) {
     private var position = 0L
     private var remaining = 0L
     private var reader: java.io.InputStream? = null
@@ -39,7 +39,12 @@ class VideoDataSource(private val video: RemoteVideo) : BaseDataSource(true) {
         if (remaining == 0L) return C.RESULT_END_OF_INPUT
         val cached = if (reader == null) video.cachedBytes(position) else 0
         val count =
-            if (cached > 0) {
+            if (cacheOnly) {
+                val bytes = video.readCachedOnly(position, minOf(length.toLong(), remaining, 32 * 1024L).toInt())
+                if (bytes.isEmpty()) throw java.io.EOFException("本地视频缓存意外结束")
+                bytes.copyInto(target, targetOffset)
+                bytes.size
+            } else if (cached > 0) {
                 val bytes =
                     video.read(
                         position,

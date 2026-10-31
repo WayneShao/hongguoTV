@@ -17,6 +17,45 @@ import org.robolectric.annotation.Config
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class VideoStartupCacheTest {
     @Test
+    fun cacheOnlySourceDoesNotRefetchAfterBackingFileIsTruncated() {
+        val bytes = ByteArray(512 * 1024) { (it % 239).toByte() }
+        java.nio.ByteBuffer.wrap(bytes).putInt(8).put("ftyp".toByteArray()).putInt(8).put("moov".toByteArray())
+        var requests = 0
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            requests++
+            val limits = chain.request().header("Range")!!.removePrefix("bytes=").split('-').map(String::toInt)
+            val end = minOf(bytes.lastIndex, limits[1])
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(206).message("partial")
+                .header("Content-Range", "bytes ${limits[0]}-$end/${bytes.size}")
+                .body(bytes.copyOfRange(limits[0], end + 1).toResponseBody()).build()
+        }.build()
+        val directory = java.nio.file.Files.createTempDirectory("cache-only-player").toFile()
+        val remote = RemoteVideo(http, StreamInfo("https://example.test/cache", null, "480P"))
+        val source = VideoDataSource(remote, cacheOnly = true)
+        try {
+            remote.preload(directory, { false })
+            assertTrue(remote.isCacheComplete())
+            val before = requests
+            source.open(DataSpec.Builder().setUri("hongguotv://episode/cached").setPosition(400_000).build())
+            val result = ByteArray(32)
+            assertEquals(32, source.read(result, 0, result.size))
+            assertArrayEquals(bytes.copyOfRange(400_000, 400_032), result)
+            java.io.RandomAccessFile(directory.listFiles()!!.single(), "rw").use { it.setLength(40_000) }
+            try {
+                source.read(result, 0, result.size)
+                fail("Truncated local cache must fail rather than fetching missing data")
+            } catch (expected: java.io.IOException) { }
+            assertEquals(before, requests)
+            source.close()
+            assertTrue(remote.reusable) // A DataSource read lifetime never owns the RemoteVideo.
+        } finally {
+            source.close()
+            remote.close()
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun boundedReadsCrossCacheAndHttpRangesAndCanReopenAtASeekPosition() {
         val file = ByteArray(1024 * 1024) { (it % 251).toByte() }
         java.nio.ByteBuffer.wrap(file)
