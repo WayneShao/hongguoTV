@@ -10,7 +10,7 @@ android {
     defaultConfig {
         applicationId = "com.hongguotv.rayneo"
         minSdk = 26
-        testInstrumentationRunner = "com.hongguotv.nativeapp.rayneo.InputRegressionInstrumentation"
+        testInstrumentationRunner = providers.gradleProperty("playbackTestRunner").orElse("com.hongguotv.nativeapp.rayneo.InputRegressionInstrumentation").get()
         targetSdk = 36
         versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 10
         versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0-rayneo.2"
