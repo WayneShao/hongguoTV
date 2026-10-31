@@ -75,9 +75,12 @@ class RollingPrefetch<T: Closeable>(
     private val resumable: (T)->Boolean={false},
     private val resume: ((T,ClaimSignal,Long)->T)?=null,
     private val resumeAllowed: ()->Boolean={true},
+    private val completed: (T)->Boolean={false},
 ): Closeable {
     private data class Entry<T: Closeable>(val task: PendingPreparation<T>,val created: Long)
     private val entries=linkedMapOf<String,Entry<T>>()
+    // Values are owned by the caller after claimCompleted. Only accounting lives here.
+    private val pinned=linkedMapOf<String,T>()
     private val failures=mutableMapOf<String,Pair<Int,Long>>()
     private var desired=emptyList<String>()
     private var enabled=true
@@ -104,12 +107,12 @@ class RollingPrefetch<T: Closeable>(
                 val count=failures[key]?.first ?: 0; failures[key]=(count+1) to now
             }
         }
-        var used=entries.values.sumOf { it.task.peek()?.let(bytes) ?: 0L }
+        var used=cachedBytes()
         desired.asReversed().forEach { key ->
             if(used>budget) entries.remove(key)?.let { used-=it.task.peek()?.let(bytes) ?: 0L; it.task.close(); failures[key]=3 to now }
         }
         if(entries.values.any { !it.task.done }) return true
-        val usedMemory=entries.values.sumOf { it.task.peek()?.let(memory) ?: 0L }
+        val usedMemory=retainedBytes()
         if(used>=budget || usedMemory>=memoryBudget) return false
         // Resume verified partial bytes before duration/count accounting. Unknown duration must
         // not strand an incomplete entry forever. The caller supplies its traffic gate.
@@ -131,16 +134,16 @@ class RollingPrefetch<T: Closeable>(
             },old.created)
             return true
         }
-        if(countTarget!=null && entries.size>=minOf(countTarget!!,desired.size)) return false
+        if(countTarget!=null && desired.count { it in entries || it in pinned }>=minOf(countTarget!!,desired.size)) return false
         var ahead=0L
         for(key in desired) {
-            val value=entries[key]?.task?.peek() ?: continue
+            val value=pinned[key] ?: entries[key]?.task?.peek() ?: continue
             if(countTarget!=null) continue
             val length=duration(value) ?: return false // Unknown duration: do not guess.
             ahead+=length
             if(ahead>=timeTarget) return false
         }
-        val next=desired.firstOrNull { key -> key !in entries && failures[key].let { it==null || (it.first<3 && now-it.second>=15_000) } } ?: return desired.any { it !in entries && (failures[it]?.first ?: 0)<3 }
+        val next=desired.firstOrNull { key -> key !in entries && key !in pinned && failures[key].let { it==null || (it.first<3 && now-it.second>=15_000) } } ?: return desired.any { it !in entries && it !in pinned && (failures[it]?.first ?: 0)<3 }
         entries[next]=Entry(PendingPreparation(executor) { claimed ->
             val value=load(next,claimed,budget-used)
             if(bytes(value)>budget-used || memory(value)>memoryBudget-usedMemory) { value.close(); throw IOException("预加载资源超过缓存上限") }
@@ -154,6 +157,27 @@ class RollingPrefetch<T: Closeable>(
         entry.task.claim()
         return entry.task
     }
-    @Synchronized fun count()=entries.size
+    /** A nonblocking atomic check and ownership transfer; partial/in-flight work is untouched. */
+    @Synchronized fun claimCompleted(key: String): T? {
+        val entry=entries[key] ?: return null
+        if(!entry.task.done) return null
+        if(clock()-entry.created !in 0..ttl) { entries.remove(key); entry.task.close(); return null }
+        val value=entry.task.peek() ?: return null
+        if(!completed(value)) return null
+        entry.task.claim()
+        val result=entry.task.await()
+        entries.remove(key)
+        pinned[key]=result
+        return result
+    }
+    /** Stops counting a queued resource after transition/release; never closes external ownership. */
+    @Synchronized fun consumed(key: String) { pinned.remove(key) }
+    @Synchronized fun releasePinned(key: String) { pinned.remove(key) }
+    @Synchronized fun consumed(key: String,expected: T) { if(pinned[key]===expected) pinned.remove(key) }
+    @Synchronized fun releasePinned(key: String,expected: T) { if(pinned[key]===expected) pinned.remove(key) }
+    @Synchronized fun pinnedCount()=pinned.size
+    @Synchronized fun cachedBytes()=pinned.values.sumOf(bytes)+entries.values.sumOf { it.task.peek()?.let(bytes) ?: 0L }
+    @Synchronized fun retainedBytes()=pinned.values.sumOf(memory)+entries.values.sumOf { it.task.peek()?.let(memory) ?: 0L }
+    @Synchronized fun count()=entries.size+pinned.size
     @Synchronized override fun close() { entries.values.forEach { it.task.close() }; entries.clear(); failures.clear(); desired=emptyList() }
 }

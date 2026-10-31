@@ -106,6 +106,7 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
         private set
 
     private lateinit var prepared: MediaCrypto.Prepared
+    @Volatile private var preparationValidated=false
     @Volatile private var prefix = byteArrayOf()
 
     private class PreloadYieldException: IOException("前台读取优先")
@@ -257,8 +258,10 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
                 first.bytes + range(first.bytes.size.toLong(), end - 1L).bytes
             else first.bytes.copyOf(end)
         if (header.size > prefix.size) prefix = header
-        prepared = MediaCrypto.prepare(header, info.key)
-        if (prepared.samples.any { it.end > total }) throw IOException("视频样本超出资源大小")
+        val candidate = MediaCrypto.prepare(header, info.key)
+        if (candidate.samples.any { it.end > total }) throw IOException("视频样本超出资源大小")
+        prepared = candidate
+        preparationValidated=true
         return this
     }
 
@@ -277,6 +280,30 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo,
 
     fun cachedBytes(start: Long): Int =
         (cachedSize() - start).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+
+    /** Full validated disk entity, not merely a prefix or a stale cached-byte counter. */
+    fun isCacheComplete(): Boolean = synchronized(diskLock) {
+        val file=cachedFile
+        !closed && preparationValidated && total>0 && diskBytes==total &&
+            file!=null && file.isFile && file.canRead() && file.length()==total
+    }
+
+    /** Queue preparation is strictly local. Missing/truncated data must never start HTTP. */
+    fun readCachedOnly(start: Long,length: Int): ByteArray {
+        require(length in 1..1024*1024 && start>=0)
+        val raw=synchronized(diskLock) {
+            if(!isCacheComplete()) throw IOException("完整预加载缓存已失效")
+            if(start>=total) return byteArrayOf()
+            val count=minOf(length.toLong(),total-start).toInt()
+            ByteArray(count).also { target ->
+                java.io.RandomAccessFile(cachedFile!!,"r").use {
+                    if(it.length()!=total) throw IOException("完整预加载缓存已失效")
+                    it.seek(start);it.readFully(target)
+                }
+            }
+        }
+        return MediaCrypto.decrypt(raw,start,info.key,prepared).also {delivered.addAndGet(it.size.toLong())}
+    }
 
     fun read(start: Long, length: Int): ByteArray {
         require(length in 1..1024 * 1024 && start >= 0)

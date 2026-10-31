@@ -56,6 +56,20 @@ class EpisodePreloaderTest {
   loader.configure(PreloadSettings(enabled=false));loader.update(listOf("1","2"));assertFalse(loader.pump())
   assertEquals(0,requests.get());assertEquals(0,resolutions.get())
  }
+ @Test fun queuedCompleteResourceRemainsAccountedUntilActualConsumption()=scenario { loader,requests,resolutions,_,_,_ ->
+  loader.configure(PreloadSettings(minutes=5,enabled=true));loader.update((1..10).map(Int::toString));fill(loader)
+  val video=loader.claimCompleted("1")!!
+  try {
+   val before=requests.get()
+   assertEquals(1,loader.pinnedCount());assertEquals(5,loader.count())
+   assertEquals(media.size*5L,loader.cachedBytes());fill(loader)
+   assertEquals(5,resolutions.get());assertEquals(before,requests.get())
+   assertArrayEquals(media,video.readCachedOnly(0,media.size));assertEquals(before,requests.get())
+   loader.configure(PreloadSettings(enabled=false))
+   assertTrue(video.isCacheComplete());assertEquals(media.size.toLong(),loader.cachedBytes())
+   loader.consumed("1",video);assertEquals(0L,loader.cachedBytes());assertTrue(video.reusable)
+  } finally {loader.releasePinned("1",video);video.close()}
+ }
  @Test fun partialFailureResumesSameEpisodeBeforeExpandingWindow()=scenario { loader,requests,resolutions,clock,gate,failNext ->
   loader.configure(PreloadSettings(mode=PreloadMode.EPISODES,episodes=2,enabled=true));loader.update(listOf("1","2"));failNext()
   loader.pump()

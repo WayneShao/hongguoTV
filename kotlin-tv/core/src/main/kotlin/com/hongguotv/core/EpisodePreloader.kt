@@ -36,6 +36,7 @@ class EpisodePreloader(
         },
         duration={if(it.cachedSize()>=it.total) it.durationMs() else null},
         bytes={it.cachedSize()}, clock=clock, memory={it.retainedBytes()},
+        completed={it.isCacheComplete()},
         resumable={it.canResumePreload()}, resumeAllowed={gate.allowed()},
         resume={remote,claim,budget ->
             activeClaim=claim; active=remote
@@ -56,6 +57,14 @@ class EpisodePreloader(
     fun update(keys: List<String>)=window.update(keys)
     fun pump(): Boolean=window.pump()
     fun claim(key: String): PendingPreparation<RemoteVideo>?=window.claim(key)
+    fun claimCompleted(key: String): RemoteVideo?=window.claimCompleted(key)
+    fun consumed(key: String)=window.consumed(key)
+    fun releasePinned(key: String)=window.releasePinned(key)
+    fun consumed(key: String,expected: RemoteVideo)=window.consumed(key,expected)
+    fun releasePinned(key: String,expected: RemoteVideo)=window.releasePinned(key,expected)
+    fun pinnedCount(): Int=window.pinnedCount()
+    fun cachedBytes(): Long=window.cachedBytes()
+    fun retainedBytes(): Long=window.retainedBytes()
     fun count(): Int=window.count()
     fun yieldToForeground() { if(activeClaim?.invoke()!=true) active?.yieldToForeground() }
     override fun close() { gate.update(false,0,0); window.close() }
