@@ -63,6 +63,28 @@ internal class PlayerDeviceSource(
         }
     }
 
+    /** Register a fresh identity and persist it only after the caller validates playback. */
+    fun <T> rotate(block: (PlayerDevice) -> T): T {
+        val state = recoveryState()
+        try {
+            while (!state.lock.tryLock(100, java.util.concurrent.TimeUnit.MILLISECONDS)) RequestScope.ensureActive()
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw java.io.InterruptedIOException("播放身份轮换已取消")
+        }
+        try {
+            RequestScope.ensureActive()
+            val candidate = register()
+            RequestScope.ensureActive()
+            return block(candidate).also {
+                RequestScope.ensureActive()
+                store()?.save(candidate.toJson())
+            }
+        } finally {
+            state.lock.unlock()
+        }
+    }
+
     companion object {
         private val recoveryStates = java.util.WeakHashMap<Any, RecoveryState>()
         // The shortplay video_model URL from fetchShortplayVideoModel.

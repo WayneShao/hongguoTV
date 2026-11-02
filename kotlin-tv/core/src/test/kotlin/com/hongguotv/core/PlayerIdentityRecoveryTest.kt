@@ -128,4 +128,28 @@ class PlayerIdentityRecoveryTest {
             releaseCandidate.countDown(); assertEquals("candidate",owner.get(2,java.util.concurrent.TimeUnit.SECONDS))
         } finally { releaseCandidate.countDown();pool.shutdownNow() }
     }
+
+    @Test fun explicitRotationPersistsOnlyAfterCandidatePlaybackSucceeds() {
+        val store = Store(old.toJson())
+        var registrations = 0
+        val source = PlayerDeviceSource(OkHttpClient(), store = { store }, register = { registrations++; fresh })
+        val result = source.rotate { device ->
+            assertEquals(fresh, device)
+            "playable"
+        }
+        assertEquals("playable", result)
+        assertEquals(1, registrations)
+        assertEquals(1, store.writes)
+        assertEquals(fresh, PlayerDevice.fromJson(store.value!!))
+    }
+
+    @Test fun failedExplicitRotationKeepsPreviousIdentity() {
+        val store = Store(old.toJson())
+        val source = PlayerDeviceSource(OkHttpClient(), store = { store }, register = { fresh })
+        assertThrows(IOException::class.java) {
+            source.rotate<String> { throw IOException("candidate empty") }
+        }
+        assertEquals(0, store.writes)
+        assertEquals(old.toJson(), store.value)
+    }
 }
