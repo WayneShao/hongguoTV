@@ -68,7 +68,7 @@ internal class PlayerDeviceSource(
                 synchronized(state) {
                     if(state.epoch!=epoch) throw failure
                     if(empty && ++state.emptyRounds<2) throw failure
-                    if(recoverEmpty && state.attemptedInFailurePeriod) throw failure
+                    if(empty && state.attemptedInFailurePeriod) throw failure
                     val now = monotonicMillis()
                     if (state.lastAttempt?.let { now - it < cooldownMillis } == true) throw failure
                     state.lastAttempt = now
