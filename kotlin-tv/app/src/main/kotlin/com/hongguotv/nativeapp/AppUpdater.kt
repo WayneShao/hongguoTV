@@ -27,10 +27,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 
 /** Foreground-only updater: no background service, and no networking or prompts during playback. */
-class AppUpdater(private val activity: Activity, private val idle: () -> Boolean) {
+class AppUpdater(private val activity: Activity,
+    private val repository: AppUpdateRepository = AppUpdateRepository(BuildConfig.APPLICATION_ID, BuildConfig.EMBEDDED_VOICE),
+    private val idle: () -> Boolean) {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
-    private val repository = AppUpdateRepository(BuildConfig.APPLICATION_ID, BuildConfig.EMBEDDED_VOICE)
     private val preferences = activity.getSharedPreferences("app_updates", Activity.MODE_PRIVATE)
     private val apk = File(activity.cacheDir, "updates/update.apk")
     private var task: Future<*>? = null

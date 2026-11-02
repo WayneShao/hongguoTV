@@ -30,16 +30,31 @@ internal class PlayerDeviceSource(
     private class RecoveryState {
         val lock = java.util.concurrent.locks.ReentrantLock()
         var lastAttempt: Long? = null
+        var emptyRounds = 0
+        var attemptedInFailurePeriod = false
+        var epoch = 0L
     }
     private fun recoveryState(): RecoveryState = synchronized(recoveryStates) {
         recoveryStates.getOrPut(store() ?: this) { RecoveryState() }
     }
     fun <T> recover(block: (PlayerDevice) -> T): T {
         // Ordinary reads never wait behind a slow candidate validation.
+        val state = recoveryState()
+        val epoch = synchronized(state) { state.epoch }
         val active = activeDevice()
-        return try { block(active) } catch (failure: Exception) {
-            if (failure !is DeviceRejectedException && !(recoverEmpty && failure is EmptyPlaybackException)) throw failure
-            val state = recoveryState()
+        RequestScope.ensureActive()
+        return try { block(active).also {
+            RequestScope.ensureActive()
+            synchronized(state) {
+                if(state.epoch==epoch) { state.emptyRounds=0; state.attemptedInFailurePeriod=false; state.epoch++ }
+            }
+        } } catch (failure: Exception) {
+            RequestScope.ensureActive()
+            val empty = recoverEmpty && failure is EmptyPlaybackException
+            if (failure !is DeviceRejectedException && !empty) {
+                synchronized(state) { if(state.epoch==epoch) state.emptyRounds=0 }
+                throw failure
+            }
             try {
                 while (!state.lock.tryLock(100, java.util.concurrent.TimeUnit.MILLISECONDS)) RequestScope.ensureActive()
             } catch (interrupted: InterruptedException) {
@@ -50,40 +65,26 @@ internal class PlayerDeviceSource(
                 RequestScope.ensureActive()
                 val latest = activeDevice()
                 if (latest != active) return block(latest)
-                val now = monotonicMillis()
-                if (state.lastAttempt?.let { now - it < cooldownMillis } == true) throw failure
-                // Failed registration/validation also consumes the cooldown.
-                state.lastAttempt = now
+                synchronized(state) {
+                    if(state.epoch!=epoch) throw failure
+                    if(empty && ++state.emptyRounds<2) throw failure
+                    if(recoverEmpty && state.attemptedInFailurePeriod) throw failure
+                    val now = monotonicMillis()
+                    if (state.lastAttempt?.let { now - it < cooldownMillis } == true) throw failure
+                    state.lastAttempt = now
+                    state.attemptedInFailurePeriod = true
+                }
                 val candidate = register()
+                RequestScope.ensureActive()
                 block(candidate).also {
                     RequestScope.ensureActive()
                     store()?.save(candidate.toJson())
+                    synchronized(state) { state.emptyRounds=0; state.attemptedInFailurePeriod=false; state.epoch++ }
                 }
             } finally { state.lock.unlock() }
         }
     }
 
-    /** Register a fresh identity and persist it only after the caller validates playback. */
-    fun <T> rotate(block: (PlayerDevice) -> T): T {
-        val state = recoveryState()
-        try {
-            while (!state.lock.tryLock(100, java.util.concurrent.TimeUnit.MILLISECONDS)) RequestScope.ensureActive()
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw java.io.InterruptedIOException("播放身份轮换已取消")
-        }
-        try {
-            RequestScope.ensureActive()
-            val candidate = register()
-            RequestScope.ensureActive()
-            return block(candidate).also {
-                RequestScope.ensureActive()
-                store()?.save(candidate.toJson())
-            }
-        } finally {
-            state.lock.unlock()
-        }
-    }
 
     companion object {
         private val recoveryStates = java.util.WeakHashMap<Any, RecoveryState>()

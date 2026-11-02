@@ -35,11 +35,66 @@ class AppUpdatesTest {
     @Test fun latestReleaseSelectsTheRequestedVariantAndUsesPersonalRepository() {
         val tv = AppUpdate.parseLatestRelease(releaseJson().toString(), "com.hongguotv.nativeapp", false)
         assertEquals(20, tv.versionCode)
+        assertEquals("0.11.0-local",tv.versionName)
         assertEquals("hongguoTV-TV-0.11.0.apk", tv.fileName)
         assertEquals("https://github.com/WayneShao/hongguoTV/releases/download/personal-0.11.0/hongguoTV-TV-0.11.0.apk", tv.downloadUrl)
         val full = AppUpdate.parseLatestRelease(releaseJson().toString(), "com.hongguotv.rayneo", true)
         assertEquals(26, full.versionCode)
+        assertEquals("0.11.0-rayneo-full",full.versionName)
         assertEquals("hongguoTV-X3Pro-Full-0.11.0.apk", full.fileName)
+    }
+
+    @Test fun structuredMetadataSelectsAllVariantsAndRejectsIncompleteReleases() {
+        val release=releaseJson().put("tag_name","personal-0.12.0")
+        val variants=JSONObject()
+        for((variant,suffix) in listOf("TV" to "local","X3Pro-Keyboard" to "rayneo-keyboard","X3Pro-Full" to "rayneo-full")) {
+            val pkg=if(variant=="TV") "com.hongguotv.nativeapp" else "com.hongguotv.rayneo"
+            variants.put(variant,JSONObject().put("packageName",pkg).put("versionName","0.12.0-$suffix").put("versionCode",if(variant=="TV") 21 else 27).put("minSdk",26))
+        }
+        val assets=release.getJSONArray("assets")
+        for(i in 0 until assets.length()) assets.getJSONObject(i).apply {put("name",getString("name").replace("0.11.0","0.12.0"))}
+        assets.getJSONObject(2).put("size",153L*1024*1024)
+        release.put("body","说明\n<!-- hongguotv-update ${JSONObject().put("schema",1).put("variants",variants)} -->")
+        for((pkg,voice) in listOf("com.hongguotv.nativeapp" to false,"com.hongguotv.rayneo" to false,"com.hongguotv.rayneo" to true)) {
+            val value=AppUpdate.parseLatestRelease(release.toString(),pkg,voice)
+            assertEquals(if(pkg.endsWith("nativeapp"))21L else 27L,value.versionCode)
+            assertFalse(value.notes.contains("<!--"))
+        }
+        assertThrows(IllegalArgumentException::class.java){AppUpdate.parseLatestRelease(release.put("prerelease",true).toString(),"com.hongguotv.rayneo",true)}
+        release.put("prerelease",false)
+        assets.put(assets.getJSONObject(2))
+        assertThrows(IllegalArgumentException::class.java){AppUpdate.parseLatestRelease(release.toString(),"com.hongguotv.rayneo",true)}
+    }
+
+    @Test fun liveReleaseSnapshotUsesExactVersionsAndSupportsFullSize() {
+        val path=System.getenv("HONGGUO_RELEASE_FIXTURE") ?: return
+        val json=File(path).readText()
+        for((pkg,voice) in listOf("com.hongguotv.nativeapp" to false,"com.hongguotv.rayneo" to false,"com.hongguotv.rayneo" to true)) {
+            val parsed=AppUpdate.parseLatestRelease(json,pkg,voice)
+            assertTrue(parsed.versionName.endsWith(if(pkg.endsWith("nativeapp")) "-local" else if(voice) "-rayneo-full" else "-rayneo-keyboard"))
+            assertTrue(parsed.sha256.length==64)
+        }
+    }
+
+    @Test fun repositoryUsesLatestApiAndSeparateMetadataAndDownloadTimeouts() = withFile { destination ->
+        val release=releaseJson()
+        release.getJSONArray("assets").getJSONObject(2).put("size",bytes.size)
+            .put("digest","sha256:"+MessageDigest.getInstance("SHA-256").digest(bytes).joinToString(""){"%02x".format(it)})
+        val paths=mutableListOf<String>()
+        AppUpdateRepository("com.hongguotv.rayneo",true) { builder ->
+            builder.addInterceptor { chain ->
+                val request=chain.request();paths+=request.url.toString()
+                val metadata=request.url.host=="api.github.com"
+                assertEquals(if(metadata)25_000_000_000L else 0L,chain.call().timeout().timeoutNanos())
+                val value=if(metadata)release.toString().toByteArray() else bytes
+                okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(okhttp3.ResponseBody.create(null,value)).build()
+            }
+        }.use { repository ->
+            val selected=repository.latest(); repository.download(selected,destination) {}
+            assertTrue(UpdateFiles.verify(destination,selected))
+            assertEquals(listOf(AppUpdate.RELEASE_API,selected.downloadUrl),paths)
+        }
     }
 
     @Test fun latestReleaseRejectsMissingOrUntrustedVariantMetadata() {

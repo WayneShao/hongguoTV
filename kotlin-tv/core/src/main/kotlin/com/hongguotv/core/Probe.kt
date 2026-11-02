@@ -1,6 +1,32 @@
 package com.hongguotv.core
 
 fun main(args: Array<String>) {
+    if(args.contains("--updates-probe")) {
+        val proxy=System.getenv("HONGGUO_PROBE_PROXY_PORT")?.toIntOrNull()
+        for((pkg,voice) in listOf("com.hongguotv.nativeapp" to false,"com.hongguotv.rayneo" to false,"com.hongguotv.rayneo" to true)) {
+            AppUpdateRepository(pkg,voice) { builder ->
+                proxy?.let { port -> builder.proxySelector(object: java.net.ProxySelector() {
+                    override fun select(uri: java.net.URI)=listOf(if(uri.host=="api.github.com") java.net.Proxy.NO_PROXY else
+                        java.net.Proxy(java.net.Proxy.Type.HTTP,java.net.InetSocketAddress("127.0.0.1",port)))
+                    override fun connectFailed(uri: java.net.URI,sa: java.net.SocketAddress,e: java.io.IOException) {}
+                }) }
+            }.use { repository ->
+                val update=repository.latest()
+                println("latest variant=${update.fileName} version=${update.versionName} code=${update.versionCode} bytes=${update.size}")
+                System.getenv("HONGGUO_APK_DIRECTORY")?.let {dir ->
+                    val file=java.io.File(dir,update.fileName)
+                    check(UpdateFiles.verify(file,update)) {"Local published APK mismatch: ${update.fileName}"}
+                    println("localApkMatches=true")
+                }
+                if(pkg.endsWith("nativeapp") && args.contains("--download-update")) {
+                    val dir=java.nio.file.Files.createTempDirectory("hongguo-update-probe").toFile()
+                    try {repository.download(update,java.io.File(dir,"update.apk")) {};println("releaseDownloadVerified=true")}
+                    finally {dir.deleteRecursively()}
+                }
+            }
+        }
+        return
+    }
     if(args.contains("--preload-probe")) {
         val repository=ContentRepository()
         fun slot()=object: PlayerDeviceStore { var value: String?=null; override fun load()=value; override fun save(value: String?) { this.value=value } }
