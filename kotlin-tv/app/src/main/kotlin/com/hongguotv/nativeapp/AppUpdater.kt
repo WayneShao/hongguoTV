@@ -30,7 +30,7 @@ import java.util.concurrent.Future
 class AppUpdater(private val activity: Activity, private val idle: () -> Boolean) {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
-    private val repository = AppUpdateRepository()
+    private val repository = AppUpdateRepository(BuildConfig.APPLICATION_ID, BuildConfig.EMBEDDED_VOICE)
     private val preferences = activity.getSharedPreferences("app_updates", Activity.MODE_PRIVATE)
     private val apk = File(activity.cacheDir, "updates/update.apk")
     private var task: Future<*>? = null
@@ -65,7 +65,6 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         }
     }
     fun resume() {
-        if (BuildConfig.APPLICATION_ID == "com.hongguotv.rayneo") { active=true; return }
         active = true; main.removeCallbacks(poll); main.postDelayed(poll, 8000)
         if (permissionRequested) {
             permissionRequested = false
@@ -96,20 +95,6 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     }
     fun show(from: View?) {
         if (!active) return
-        if (BuildConfig.APPLICATION_ID == "com.hongguotv.rayneo") {
-            dialog?.dismiss()
-            anchor = from
-            val next = RayNeoDialogs.builder(activity).setTitle("版本与更新 · ${BuildConfig.VERSION_NAME}")
-                .setMessage("当前版本单独维护，后续使用相同签名的安装包更新。收藏和观看记录保存在本机。")
-                .setPositiveButton("关闭",null).create()
-            dialog = next
-            next.setOnDismissListener {
-                if (dialog === next) dialog = null
-                if (from?.isAttachedToWindow == true) from.requestFocus()
-            }
-            next.show()
-            return
-        }
         anchor = from
         dialog?.dismiss()
         val dp = activity.resources.displayMetrics.density

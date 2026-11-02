@@ -3,6 +3,7 @@ import java.util.Properties
 plugins { id("com.android.application"); kotlin("android") }
 val signingProperties = Properties().apply { val config = rootProject.file("keystore.properties"); if (config.exists()) config.inputStream().use { load(it) } }
 fun signingValue(env: String, key: String): String? = System.getenv(env) ?: signingProperties.getProperty(key)
+val embeddedVoice = providers.gradleProperty("embeddedVoice").orElse("true").get().toBoolean()
 
 android {
     namespace = "com.hongguotv.nativeapp"
@@ -16,6 +17,7 @@ android {
         versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "0.9.0-rayneo.2"
     }
     buildFeatures { buildConfig = true }
+    defaultConfig { buildConfigField("boolean", "EMBEDDED_VOICE", embeddedVoice.toString()) }
     signingConfigs {
         create("delivery") {
             storeFile = signingValue("HONGGUOTV_KEYSTORE", "storeFile")?.let { file(it) }

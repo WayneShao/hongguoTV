@@ -35,6 +35,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private val site = "https://hongguoduanju.com"
     private data class SearchCursor(val deviceId: String, val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
+    // An empty response can be an identity-specific soft block. Count only complete
+    // registered-playback rounds; rotate once after two rounds, then wait for a valid
+    // response before allowing another rotation.
+    private val playbackIdentityLock = Any()
+    private var emptyPlaybackRounds = 0
+    private var playbackIdentityRotated = false
     private fun text(url: String, signed: Signer.Request? = null): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
@@ -190,16 +196,45 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private fun streamWithinBudget(id: String,maxQuality: Int): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
         if (deviceStore != null) {
-            try { return devices.recover { device -> playerStream(id, maxQuality, device) } }
+            try {
+                return devices.recover { device -> playerStream(id, maxQuality, device) }
+                    .also { resetPlaybackIdentityRecovery() }
+            }
             catch (e: Exception) {
                 RequestScope.ensureActive()
                 if(e is PlaybackBudgetExceededException) throw e
-                // Keep the previous protocol as a fallback, but do not start a second
-                // random-identity rotation after the registered candidate failed.
-                return streamOnce(id, maxQuality)
+                if(e is EmptyPlaybackException) {
+                    val rotate = shouldRotatePlaybackIdentity()
+                    if(rotate) {
+                        try {
+                            return devices.rotate { device -> playerStream(id, maxQuality, device) }
+                                .also { resetPlaybackIdentityRecovery() }
+                        } catch(rotation: PlaybackBudgetExceededException) {
+                            throw rotation
+                        } catch(rotation: Exception) {
+                            RequestScope.ensureActive()
+                            // Keep the old identity on failed validation and retain the
+                            // bounded legacy fallback for this playback attempt.
+                        }
+                    }
+                }
+                // The legacy path remains a bounded fallback. A successful result ends
+                // the empty-response episode and permits future recovery if needed.
+                return streamOnce(id, maxQuality).also { resetPlaybackIdentityRecovery() }
             }
         }
         return runWithIdentityRecovery { streamOnce(id, maxQuality) }
+    }
+
+    private fun shouldRotatePlaybackIdentity(): Boolean = synchronized(playbackIdentityLock) {
+        emptyPlaybackRounds++
+        if(emptyPlaybackRounds < 2 || playbackIdentityRotated) false
+        else { playbackIdentityRotated=true; true }
+    }
+
+    private fun resetPlaybackIdentityRecovery() = synchronized(playbackIdentityLock) {
+        emptyPlaybackRounds=0
+        playbackIdentityRotated=false
     }
     private fun playerStream(id: String, maxQuality: Int, device: PlayerDevice): StreamInfo {
         val rows = mutableListOf<PlayerVariant>()

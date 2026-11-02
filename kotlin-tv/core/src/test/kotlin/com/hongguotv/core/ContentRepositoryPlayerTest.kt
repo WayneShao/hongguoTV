@@ -193,6 +193,24 @@ class ContentRepositoryPlayerTest {
     }
     @Test fun finalEmptyBodyRegistersCandidateAndValidatesSameEpisodeBeforeSaving() = verifyEmptyRecovery("")
     @Test fun finalEmptyModelRegistersCandidateAndValidatesSameEpisodeBeforeSaving() = verifyEmptyRecovery("""{"code":0,"data":{"123":{"video_model":{}}}}""")
+
+    @Test fun consecutiveEmptyPlaybackRoundsRotateIdentityOnlyOnce() {
+        var registrations = 0
+        val (repo, store) = repository { request ->
+            when {
+                request.url.encodedPath.contains("device_register") -> {
+                    registrations++
+                    """{"device_id":"789000000000000000$registrations","install_id":"987000000000000000$registrations"}"""
+                }
+                request.url.host.endsWith("fqnovel.com") -> ""
+                else -> ""
+            }
+        }
+        repeat(3) { assertThrows(IOException::class.java) { repo.stream("123", 720) } }
+        assertEquals("failed identities never replace the stored candidate", deviceJson, store.value)
+        assertEquals("one initial candidate plus one post-empty-round rotation", 2, registrations)
+    }
+
     private fun verifyEmptyRecovery(emptyResponse: String) {
         var registrations=0
         var modelCalls=0
