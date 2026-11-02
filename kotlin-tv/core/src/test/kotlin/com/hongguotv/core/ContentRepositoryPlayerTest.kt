@@ -208,7 +208,7 @@ class ContentRepositoryPlayerTest {
         }
         repeat(3) { assertThrows(IOException::class.java) { repo.stream("123", 720) } }
         assertEquals("failed identities never replace the stored candidate", deviceJson, store.value)
-        assertEquals("one initial candidate plus one post-empty-round rotation", 2, registrations)
+        assertEquals("one candidate per continuous empty failure period", 1, registrations)
     }
 
     private fun verifyEmptyRecovery(emptyResponse: String) {
@@ -229,6 +229,8 @@ class ContentRepositoryPlayerTest {
                 else -> "{}"
             }
         }
+        assertThrows(IOException::class.java) { repo.stream("123",720,PlaybackRequestBudget(8,0)) }
+        assertEquals(0,registrations)
         assertEquals("https://example.com/recovered",repo.stream("123",720).url)
         assertEquals(1,registrations)
         assertEquals("789",PlayerDevice.fromJson(store.value!!)!!.deviceId)

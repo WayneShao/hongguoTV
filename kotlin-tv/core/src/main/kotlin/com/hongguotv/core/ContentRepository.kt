@@ -35,12 +35,6 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private val site = "https://hongguoduanju.com"
     private data class SearchCursor(val deviceId: String, val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
-    // An empty response can be an identity-specific soft block. Count only complete
-    // registered-playback rounds; rotate once after two rounds, then wait for a valid
-    // response before allowing another rotation.
-    private val playbackIdentityLock = Any()
-    private var emptyPlaybackRounds = 0
-    private var playbackIdentityRotated = false
     private fun text(url: String, signed: Signer.Request? = null): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
         signed?.headers?.forEach { (k,v) -> request.header(k,v) }
@@ -196,46 +190,17 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private fun streamWithinBudget(id: String,maxQuality: Int): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
         if (deviceStore != null) {
-            try {
-                return devices.recover { device -> playerStream(id, maxQuality, device) }
-                    .also { resetPlaybackIdentityRecovery() }
-            }
+            try { return devices.recover { device -> playerStream(id, maxQuality, device) } }
             catch (e: Exception) {
                 RequestScope.ensureActive()
                 if(e is PlaybackBudgetExceededException) throw e
-                if(e is EmptyPlaybackException) {
-                    val rotate = shouldRotatePlaybackIdentity()
-                    if(rotate) {
-                        try {
-                            return devices.rotate { device -> playerStream(id, maxQuality, device) }
-                                .also { resetPlaybackIdentityRecovery() }
-                        } catch(rotation: PlaybackBudgetExceededException) {
-                            throw rotation
-                        } catch(rotation: Exception) {
-                            RequestScope.ensureActive()
-                            // Keep the old identity on failed validation and retain the
-                            // bounded legacy fallback for this playback attempt.
-                        }
-                    }
-                }
-                // The legacy path remains a bounded fallback. A successful result ends
-                // the empty-response episode and permits future recovery if needed.
-                return streamOnce(id, maxQuality).also { resetPlaybackIdentityRecovery() }
+                // Recovery is shared by store; do not bypass its cooldown or one-candidate limit.
+                return streamOnce(id, maxQuality)
             }
         }
         return runWithIdentityRecovery { streamOnce(id, maxQuality) }
     }
 
-    private fun shouldRotatePlaybackIdentity(): Boolean = synchronized(playbackIdentityLock) {
-        emptyPlaybackRounds++
-        if(emptyPlaybackRounds < 2 || playbackIdentityRotated) false
-        else { playbackIdentityRotated=true; true }
-    }
-
-    private fun resetPlaybackIdentityRecovery() = synchronized(playbackIdentityLock) {
-        emptyPlaybackRounds=0
-        playbackIdentityRotated=false
-    }
     private fun playerStream(id: String, maxQuality: Int, device: PlayerDevice): StreamInfo {
         val rows = mutableListOf<PlayerVariant>()
         var rejected = false
@@ -337,7 +302,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
         val entry=map.optJSONObject(id) ?: throw IOException("播放信息为空")
         val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
-        val raw=model.opt("fallback_api")
+        val raw=model.opt("fallback_api") ?: throw EmptyPlaybackException()
         val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
         if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
         val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")

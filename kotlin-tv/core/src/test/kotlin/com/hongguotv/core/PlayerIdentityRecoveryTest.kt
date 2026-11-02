@@ -6,6 +6,43 @@ import org.junit.Test
 import java.io.IOException
 
 class PlayerIdentityRecoveryTest {
+    @Test fun twoEmptyRoundsShareOneCandidateAcrossRepositoriesUntilSuccess() {
+        val store=Store(old.toJson()); var registrations=0; var now=0L
+        fun source()=PlayerDeviceSource(OkHttpClient(),store={store},recoverEmpty=true,
+            register={registrations++;fresh},monotonicMillis={now})
+        fun fail() { assertThrows(EmptyPlaybackException::class.java) { source().recover<String> {throw EmptyPlaybackException()} } }
+        fail(); assertEquals(0,registrations)
+        fail(); assertEquals(1,registrations)
+        now=600_000; repeat(3){fail()}; assertEquals(1,registrations)
+        source().recover { "valid" }
+        fail(); assertEquals(1,registrations)
+        fail(); assertEquals(2,registrations)
+        assertEquals(0,store.writes)
+    }
+    @Test fun nonEmptyFailureBreaksEmptySequenceAndCancellationNeverRegisters() {
+        val store=Store(old.toJson());var registrations=0
+        val source=PlayerDeviceSource(OkHttpClient(),store={store},recoverEmpty=true,register={registrations++;fresh})
+        fun empty() {assertThrows(EmptyPlaybackException::class.java){source.recover<String>{throw EmptyPlaybackException()}}}
+        empty()
+        assertThrows(IOException::class.java){source.recover<String>{throw IOException("network")}}
+        empty();assertEquals(0,registrations)
+        val scope=RequestScope();scope.cancel()
+        assertThrows(IOException::class.java){scope.run {source.recover<String>{throw EmptyPlaybackException()}}}
+        assertEquals(0,registrations)
+    }
+    @Test fun concurrentEmptyFailuresHaveOnlyOneCandidateEvenAfterCooldown() {
+        val store=Store(old.toJson());val registrations=java.util.concurrent.atomic.AtomicInteger()
+        val arrived=java.util.concurrent.CyclicBarrier(2); val pool=java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val jobs=(1..2).map { pool.submit<Boolean> {
+                val source=PlayerDeviceSource(OkHttpClient(),store={store},recoverEmpty=true,register={registrations.incrementAndGet();fresh})
+                try {source.recover<String> {if(it==old) arrived.await(2,java.util.concurrent.TimeUnit.SECONDS);throw EmptyPlaybackException()};false}
+                catch(_: EmptyPlaybackException){true}
+            } }
+            jobs.forEach {assertTrue(it.get(3,java.util.concurrent.TimeUnit.SECONDS))}
+            assertEquals(1,registrations.get());assertEquals(0,store.writes)
+        } finally {pool.shutdownNow()}
+    }
     private val old = PlayerDevice("123", "456", "old", "", "")
     private val fresh = PlayerDevice("789", "987", "new", "", "")
     private class Store(var value: String?) : PlayerDeviceStore {
@@ -133,7 +170,8 @@ class PlayerIdentityRecoveryTest {
         val store = Store(old.toJson())
         var registrations = 0
         val source = PlayerDeviceSource(OkHttpClient(), store = { store }, register = { registrations++; fresh })
-        val result = source.rotate { device ->
+        val result = source.recover { device ->
+            if(device==old) throw DeviceRejectedException("rejected")
             assertEquals(fresh, device)
             "playable"
         }
@@ -147,7 +185,7 @@ class PlayerIdentityRecoveryTest {
         val store = Store(old.toJson())
         val source = PlayerDeviceSource(OkHttpClient(), store = { store }, register = { fresh })
         assertThrows(IOException::class.java) {
-            source.rotate<String> { throw IOException("candidate empty") }
+            source.recover<String> { if(it==old) throw DeviceRejectedException("rejected"); throw IOException("candidate empty") }
         }
         assertEquals(0, store.writes)
         assertEquals(old.toJson(), store.value)

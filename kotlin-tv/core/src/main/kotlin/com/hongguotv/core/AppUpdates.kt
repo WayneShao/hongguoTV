@@ -39,40 +39,54 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
         }
 
         fun parseLatestRelease(json: String, packageName: String, embeddedVoice: Boolean): AppUpdate {
-            require(packageName == "com.hongguotv.nativeapp" || packageName == "com.hongguotv.rayneo") { "更新包名不受支持" }
-            val release = JSONObject(json)
-            val tag = release.getString("tag_name")
-            require(tag.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,80}"))) { "Release 标签不受支持" }
-            val assetName = when {
-                packageName == "com.hongguotv.nativeapp" -> "hongguoTV-TV-"
-                embeddedVoice -> "hongguoTV-X3Pro-Full-"
-                else -> "hongguoTV-X3Pro-Keyboard-"
+            require(packageName in setOf("com.hongguotv.nativeapp", "com.hongguotv.rayneo"))
+            val release=JSONObject(json)
+            require(!release.optBoolean("draft") && !release.optBoolean("prerelease")) { "只接受正式发布版本" }
+            val tag=release.getString("tag_name")
+            require(tag.matches(Regex("personal-[0-9]+\\.[0-9]+\\.[0-9]+")))
+            val number=tag.removePrefix("personal-")
+            val variant=when {packageName=="com.hongguotv.nativeapp" -> "TV"; embeddedVoice -> "X3Pro-Full"; else -> "X3Pro-Keyboard"}
+            val suffix=when(variant){"TV" -> "local"; "X3Pro-Full" -> "rayneo-full"; else -> "rayneo-keyboard"}
+            val fileName="hongguoTV-$variant-$number.apk"
+            val assets=release.getJSONArray("assets").objects().filter {it.optString("name")==fileName}
+            require(assets.size==1) { "Release 缺少当前版本安装包或出现重复资产" }
+            val asset=assets.single()
+            require(asset.optString("state","uploaded")=="uploaded")
+            val body=release.optString("body")
+            val marker="<!-- hongguotv-update "
+            val start=body.indexOf(marker)
+            val code: Long
+            val minSdk: Int
+            val versionName="$number-$suffix"
+            if(start>=0) {
+                val end=body.indexOf(" -->",start+marker.length)
+                require(end>start && body.indexOf(marker,start+marker.length)<0)
+                val meta=JSONObject(body.substring(start+marker.length,end))
+                require(meta.getInt("schema")==1)
+                val entry=meta.getJSONObject("variants").getJSONObject(variant)
+                require(entry.getString("packageName")==packageName && entry.getString("versionName")==versionName)
+                code=entry.getLong("versionCode");minSdk=entry.getInt("minSdk")
+            } else {
+                // Compatibility with personal-0.11.0, before structured release metadata.
+                require(tag=="personal-0.11.0") { "Release 缺少更新元数据" }
+                val label=variant.replace('-',' ')
+                val line=body.lineSequence().map {it.replace("**", "").trim()}
+                    .singleOrNull {it.startsWith("- $label：") || it.startsWith("- $label:")}
+                    ?: throw IllegalArgumentException("Release 缺少版本号元数据")
+                require(line.contains(versionName))
+                code=Regex("versionCode\\s*[:=]?\\s*(\\d+)").find(line)?.groupValues?.get(1)?.toLong()
+                    ?: throw IllegalArgumentException("Release 版本号格式不正确")
+                minSdk=26
             }
-            val variantLabel = when {
-                packageName == "com.hongguotv.nativeapp" -> "TV"
-                embeddedVoice -> "X3Pro Full"
-                else -> "X3Pro Keyboard"
-            }
-            val asset = (release.optJSONArray("assets") ?: JSONArray()).let { assets ->
-                (0 until assets.length()).asSequence().map { assets.getJSONObject(it) }
-                    .firstOrNull { it.optString("name").startsWith(assetName) }
-                    ?: throw IllegalArgumentException("Release 缺少当前设备版本")
-            }
-            val fileName = asset.getString("name")
-            require(fileName.matches(Regex("hongguoTV-[A-Za-z0-9-]+-[0-9][0-9A-Za-z.+-]{0,80}\\.apk")))
-            val line = release.optString("body").lineSequence().firstOrNull {
-                it.contains(variantLabel) && it.contains("versionCode")
-            } ?: throw IllegalArgumentException("Release 缺少版本号元数据")
-            val code = Regex("versionCode\\s*[:=]?\\s*(\\d+)").find(line)?.groupValues?.get(1)?.toLong()
-                ?: throw IllegalArgumentException("Release 版本号格式不正确")
-            val version = Regex("-([0-9][0-9A-Za-z.+-]{0,80})\\.apk$").find(fileName)?.groupValues?.get(1)
-                ?: throw IllegalArgumentException("Release 文件名版本不正确")
-            val digest = asset.optString("digest").removePrefix("sha256:").lowercase()
-            require(digest.matches(Regex("[0-9a-f]{64}"))) { "Release 缺少 SHA-256 摘要" }
-            val size = asset.getLong("size")
-            require(size in 1..MAX_APK_BYTES)
-            return AppUpdate(code, version, 26, tag, fileName, size, digest, release.optString("body").take(1500))
+            require(code in 1..Int.MAX_VALUE.toLong() && minSdk in 26..100)
+            val digest=asset.getString("digest")
+            require(digest.matches(Regex("sha256:[0-9a-fA-F]{64}"))) { "Release 缺少 SHA-256 摘要" }
+            val size=asset.getLong("size");require(size in 1..MAX_APK_BYTES)
+            val update=AppUpdate(code,versionName,minSdk,tag,fileName,size,digest.substring(7).lowercase(),body.substringBefore(marker).take(1500))
+            require(!asset.has("browser_download_url") || asset.getString("browser_download_url")==update.downloadUrl)
+            return update
         }
+
     }
 }
 
@@ -110,15 +124,16 @@ object UpdateFiles {
 class AppUpdateRepository(
     private val packageName: String = "com.hongguotv.nativeapp",
     private val embeddedVoice: Boolean = false,
+    configure: (OkHttpClient.Builder) -> Unit = {},
 ) : java.io.Closeable {
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
-        .callTimeout(5, TimeUnit.MINUTES).addNetworkInterceptor { chain ->
+        .callTimeout(0, TimeUnit.MILLISECONDS).addNetworkInterceptor { chain ->
             val url = chain.request().url
             // Follow GitHub's CDN redirects, never cleartext or arbitrary manifest-provided hosts.
             if (url.scheme != "https" || url.host !in setOf("api.github.com", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"))
                 throw IOException("更新下载地址不受支持")
             chain.proceed(chain.request())
-        }.build()
+        }.apply(configure).build()
     private fun request(url: String) = Request.Builder().url(url).header("User-Agent", "HongguoTV-Updater")
         .header("Cache-Control", "no-cache").build()
     fun latest(): AppUpdate {
