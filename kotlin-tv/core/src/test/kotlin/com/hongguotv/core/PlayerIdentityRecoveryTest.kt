@@ -6,6 +6,15 @@ import org.junit.Test
 import java.io.IOException
 
 class PlayerIdentityRecoveryTest {
+    @Test fun explicitRejectionCanRecoverAfterFailedRegistrationCooldown() {
+        val store=Store(old.toJson());var registrations=0;var now=0L
+        val source=PlayerDeviceSource(OkHttpClient(),store={store},recoverEmpty=true,monotonicMillis={now},
+            register={if(++registrations==1) throw IOException("temporary registration failure");fresh})
+        fun recover()=source.recover {if(it==old) throw DeviceRejectedException("rejected");"ok"}
+        assertThrows(IOException::class.java){recover()}
+        now=300_000
+        assertEquals("ok",recover());assertEquals(2,registrations);assertEquals(1,store.writes)
+    }
     @Test fun twoEmptyRoundsShareOneCandidateAcrossRepositoriesUntilSuccess() {
         val store=Store(old.toJson()); var registrations=0; var now=0L
         fun source()=PlayerDeviceSource(OkHttpClient(),store={store},recoverEmpty=true,
