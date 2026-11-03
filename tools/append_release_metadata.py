@@ -25,7 +25,7 @@ def append_metadata(version, records, notes):
         if row["package"] != package or row["version"] != f"{version}-{suffix}":
             raise ValueError(f"Wrong APK identity: {variant}")
         code, sdk = row["code"], row["minSdk"]
-        if not 1 <= code <= 2147483647 or not 26 <= sdk <= 100:
+        if not 1 <= code <= 2147483647 or not 21 <= sdk <= 100:
             raise ValueError("Invalid code/minSdk")
         variants[variant] = dict(packageName=package, versionName=row["version"], versionCode=code, minSdk=sdk)
     marker = "<!-- hongguotv-update "

@@ -49,7 +49,7 @@ class AppUpdatesTest {
         val variants=JSONObject()
         for((variant,suffix) in listOf("TV" to "local","X3Pro-Keyboard" to "rayneo-keyboard","X3Pro-Full" to "rayneo-full")) {
             val pkg=if(variant=="TV") "com.hongguotv.nativeapp" else "com.hongguotv.rayneo"
-            variants.put(variant,JSONObject().put("packageName",pkg).put("versionName","0.12.0-$suffix").put("versionCode",if(variant=="TV") 21 else 27).put("minSdk",26))
+            variants.put(variant,JSONObject().put("packageName",pkg).put("versionName","0.12.0-$suffix").put("versionCode",if(variant=="TV") 21 else 27).put("minSdk",if(variant=="TV") 21 else 26))
         }
         val assets=release.getJSONArray("assets")
         for(i in 0 until assets.length()) assets.getJSONObject(i).apply {put("name",getString("name").replace("0.11.0","0.12.0"))}
@@ -58,6 +58,7 @@ class AppUpdatesTest {
         for((pkg,voice) in listOf("com.hongguotv.nativeapp" to false,"com.hongguotv.rayneo" to false,"com.hongguotv.rayneo" to true)) {
             val value=AppUpdate.parseLatestRelease(release.toString(),pkg,voice)
             assertEquals(if(pkg.endsWith("nativeapp"))21L else 27L,value.versionCode)
+            assertEquals(if(pkg.endsWith("nativeapp"))21 else 26,value.minSdk)
             assertFalse(value.notes.contains("<!--"))
         }
         assertThrows(IllegalArgumentException::class.java){AppUpdate.parseLatestRelease(release.put("prerelease",true).toString(),"com.hongguotv.rayneo",true)}

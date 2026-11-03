@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit
 import java.time.Duration
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk=[28])
+@Config(sdk=[21,28])
 class AppUpdaterTest {
     @Test fun manualCheckUsesRealDialogAndPauseCancelsLateCallback() {
         val controller=Robolectric.buildActivity(Activity::class.java).setup()

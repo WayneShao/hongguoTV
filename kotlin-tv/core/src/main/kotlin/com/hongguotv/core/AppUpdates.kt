@@ -30,7 +30,7 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
             val apk = o.getJSONObject("apk")
             val update = AppUpdate(o.getLong("versionCode"), o.getString("versionName"), o.getInt("minSdk"),
                 o.getString("tag"), apk.getString("name"), apk.getLong("size"), apk.getString("sha256").lowercase(), o.optString("notes").take(1500))
-            require(update.versionCode in 1..Int.MAX_VALUE.toLong() && update.minSdk in 26..100)
+            require(update.versionCode in 1..Int.MAX_VALUE.toLong() && update.minSdk in 21..100)
             require(update.versionName.matches(Regex("[0-9][0-9A-Za-z.+-]{0,63}")))
             require(update.tag.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,80}")))
             require(update.fileName.matches(Regex("(?:hongguotv-kotlin-[0-9][0-9A-Za-z.+-]{0,80}-android8|hongguoTV-[A-Za-z0-9-]+-[0-9][0-9A-Za-z.+-]{0,80})\\.apk")))
@@ -78,7 +78,7 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
                     ?: throw IllegalArgumentException("Release 版本号格式不正确")
                 minSdk=26
             }
-            require(code in 1..Int.MAX_VALUE.toLong() && minSdk in 26..100)
+            require(code in 1..Int.MAX_VALUE.toLong() && minSdk in 21..100)
             val digest=asset.getString("digest")
             require(digest.matches(Regex("sha256:[0-9a-fA-F]{64}"))) { "Release 缺少 SHA-256 摘要" }
             val size=asset.getLong("size");require(size in 1..MAX_APK_BYTES)
@@ -126,7 +126,7 @@ class AppUpdateRepository(
     private val embeddedVoice: Boolean = false,
     configure: (OkHttpClient.Builder) -> Unit = {},
 ) : java.io.Closeable {
-    private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
+    private val http = com.hongguotv.core.HttpTransport.builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(0, TimeUnit.MILLISECONDS).addNetworkInterceptor { chain ->
             val url = chain.request().url
             // Follow GitHub's CDN redirects, never cleartext or arbitrary manifest-provided hosts.

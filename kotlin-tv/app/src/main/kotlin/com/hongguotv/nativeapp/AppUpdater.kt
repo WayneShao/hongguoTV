@@ -68,7 +68,7 @@ class AppUpdater(private val activity: Activity,
         active = true; main.removeCallbacks(poll); main.postDelayed(poll, 8000)
         if (permissionRequested) {
             permissionRequested = false
-            if (activity.packageManager.canRequestPackageInstalls()) install()
+            if (canInstallPackages()) install()
             else { status = "安装权限未开启，可在这里再次安装"; show(anchor) }
         }
     }
@@ -177,7 +177,7 @@ class AppUpdater(private val activity: Activity,
         fun signers(info: android.content.pm.PackageInfo) =
             (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures)?.map { it.toCharsString() }?.toSet().orEmpty()
         if (candidate.packageName != activity.packageName || version != update.versionCode || candidate.versionName != update.versionName || version <= BuildConfig.VERSION_CODE ||
-            candidate.applicationInfo?.minSdkVersion != update.minSdk || signers(installed).isEmpty() || signers(installed) != signers(candidate))
+            (Build.VERSION.SDK_INT >= 24 && minSdk(candidate) != update.minSdk) || signers(installed).isEmpty() || signers(installed) != signers(candidate))
             throw IOException("新版包名、版本或签名不匹配，已阻止安装")
     }
     private fun install() {
@@ -185,7 +185,7 @@ class AppUpdater(private val activity: Activity,
         if (busy || !active || !ready) return
         work({ validateApk(update) }) {
             try {
-                if (!activity.packageManager.canRequestPackageInstalls()) {
+                if (!canInstallPackages()) {
                     permissionRequested = true
                     activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}")))
                 } else {
@@ -196,4 +196,7 @@ class AppUpdater(private val activity: Activity,
             } catch (_: Exception) { permissionRequested = false; updateStatus("电视未提供安装或授权入口，请通过系统文件管理器安装新版") }
         }
     }
+    private fun canInstallPackages() = Build.VERSION.SDK_INT < 26 || activity.packageManager.canRequestPackageInstalls()
+    @Suppress("DEPRECATION")
+    private fun minSdk(info: android.content.pm.PackageInfo): Int = if (Build.VERSION.SDK_INT >= 24) info.applicationInfo?.minSdkVersion ?: 1 else 0
 }

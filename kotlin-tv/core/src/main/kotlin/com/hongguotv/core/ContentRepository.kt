@@ -25,7 +25,7 @@ data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 class DeviceIdentityRejectedException(message: String): IOException(message)
 
-class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, private val prepareIdentityRetry: (() -> Unit)? = null, private val commitIdentityRetry: (() -> Unit)? = null, private val rollbackIdentityRetry: (() -> Unit)? = null) {
+class ContentRepository(val http: OkHttpClient = com.hongguotv.core.HttpTransport.builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, private val prepareIdentityRetry: (() -> Unit)? = null, private val commitIdentityRetry: (() -> Unit)? = null, private val rollbackIdentityRetry: (() -> Unit)? = null) {
     private val modelHttp=http.newBuilder().retryOnConnectionFailure(false).build()
     private val signer = Signer()
     private val devices = PlayerDeviceSource(http, recoverEmpty = true)

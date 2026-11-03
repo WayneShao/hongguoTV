@@ -10,7 +10,7 @@ android {
     compileSdk = 36
     defaultConfig {
         applicationId = "com.hongguotv.nativeapp"
-        minSdk = 26
+        minSdk = 21
         testInstrumentationRunner = providers.gradleProperty("playbackTestRunner").orElse("com.hongguotv.nativeapp.SeamlessPlaybackInstrumentation").get()
         targetSdk = 36
         versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 9
