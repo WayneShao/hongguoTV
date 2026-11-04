@@ -147,6 +147,7 @@ internal class AccountScreen(
                     val message=it.message.orEmpty()
                     val expired=message.contains("未登录") || message.contains("登录已过期") || message.contains("请先登录")
                     if(expired) { repository.logout(); AuthStore.clear(activity); changed(); render(); status?.text="登录已过期，请重新扫码" }
+                    else if(it is AccountProfileUnavailableException) status?.text=it.message
                     else status?.text="账号请求失败，请重试（${it.javaClass.simpleName}）"
                 }
             }

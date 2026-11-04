@@ -134,7 +134,7 @@ internal object StreamModels {
             append(' ').append(info.optJSONObject("video_meta")?.str("codec_type").orEmpty().lowercase())
             append(' ').append(info.str("gear_des_key").lowercase())
         }
-        if (codec.contains("bytevc2")) return null
+        if (codec.contains("bytevc2") || codec.contains("bvc2")) return null
         val w = int64FromAny(info, "vwidth")
         val h = int64FromAny(info, "vheight")
         var b = int64FromAny(info, "bitrate")

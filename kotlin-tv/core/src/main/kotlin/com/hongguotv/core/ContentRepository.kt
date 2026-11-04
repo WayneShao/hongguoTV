@@ -21,7 +21,7 @@ data class Detail(val series: Series, val episodes: List<String>)
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
-data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
+data class StreamInfo(val url: String, val key: ByteArray?, val quality: String, val availableQualities: List<Int> = emptyList(), val selectedQuality: Int = 0)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 class DeviceIdentityRejectedException(message: String): IOException(message)
 
@@ -193,7 +193,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             try { return devices.recover { device -> playerStream(id, maxQuality, device) } }
             catch (e: Exception) {
                 RequestScope.ensureActive()
-                if(e is PlaybackBudgetExceededException) throw e
+                if(PlaybackFailure.terminal(e)) throw e
                 // Recovery is shared by store; do not bypass its cooldown or one-candidate limit.
                 return streamOnce(id, maxQuality)
             }
@@ -205,8 +205,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val rows = mutableListOf<PlayerVariant>()
         var rejected = false
         var sawResponse = false
-        var emptyResponses = 0
+        val emptyEndpoints = mutableSetOf<Int>()
         var transportFailure: Exception? = null
+        var terminalFailure: Exception? = null
+        var incompatibleModel=false
         val requests = listOf(
             Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.SHORTPLAY_URL, device), PlayerDeviceSource.shortplayBody(id), mapOf("User-Agent" to "com.dragon.read", "Content-Type" to "application/json; charset=utf-8")),
             Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.PHOENIX_URL, device), PlayerDeviceSource.phoenixBody(id), mapOf("User-Agent" to VendorConstants.VIDEO_UA, "Accept" to "application/json; charset=utf-8,application/x-protobuf", "Content-Type" to "application/json", "x-xs-from-web" to "0", "sdk-version" to "2")),
@@ -215,51 +217,91 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             val (url, body, headers) = request
             try {
                 val signed = PlayerSigner.headers(url.substringAfter('?', ""), body)
-                val data = JSONObject(PlaybackReadRetry().read { fetch(url, headers + signed, body) })
-                val rawCode = if (data.has("code")) data.opt("code") else if (data.has("Code")) data.opt("Code") else 0
-                val code = rawCode?.toString()?.toIntOrNull() ?: throw IOException("播放状态格式异常")
+                val data = playerJson(PlaybackReadRetry().read { fetch(url, headers + signed, body) })
+                val rawCode = if (data.has("code")) data.opt("code") else if (data.has("Code")) data.opt("Code") else null
+                val code = rawCode?.toString()?.toIntOrNull() ?: throw PlaybackModelException("播放状态格式异常")
                 if (code == 10001 || code == 10002 || code == 110001) throw DeviceRejectedException("播放接口拒绝该设备")
                 sawResponse = true
                 if (code != 0) throw IOException("播放接口暂不可用")
+                if(!data.has("data")) throw PlaybackModelException("播放响应缺少 data")
                 val payload = data.optJSONObject("data")
-                if (payload == null && !data.isNull("data")) throw IOException("播放数据格式异常")
-                if (payload == null || payload.length() == 0) { emptyResponses++; continue }
+                if (payload == null && !data.isNull("data")) throw PlaybackModelException("播放数据格式异常")
+                if (payload == null || payload.length() == 0) { emptyEndpoints.add(index); continue }
                 val models = StreamModels.models(payload, id, allowDirect = index == 0)
                 if (models.isEmpty()) {
                     val entry = payload.optJSONObject(id) ?: if (index == 0 && payload.has("video_model")) payload else null
-                    if (entry != null && (entry.isNull("video_model") || entry.opt("video_model") == "")) { emptyResponses++; continue }
-                    throw IOException("播放模型缺失或分集不匹配")
+                    if (entry != null && entry.has("video_model") && (entry.isNull("video_model") || entry.opt("video_model") == "")) { emptyEndpoints.add(index); continue }
+                    throw PlaybackModelException("播放模型缺失或分集不匹配")
                 }
                 for (model in models) {
+                    val countBefore=rows.size
                     rows += StreamModels.listRows(model.optJSONObject("video_list"), StreamModels.keySeed(model))
                     rows += StreamModels.arrayRows(model.optJSONArray("video_list"))
-                    if (rows.any { it.quality == maxQuality }) return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality)
+                    if(rows.size==countBefore && (model.optJSONObject("video_list")?.length() ?: model.optJSONArray("video_list")?.length() ?: 0)>0) incompatibleModel=true
+                    if (rows.any { it.quality == maxQuality }) return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows)
                     val fallbackUrl = StreamModels.fallbackApiUrl(model)
-                    if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) emptyResponses++
+                    if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) emptyEndpoints.add(index)
                     if (fallbackUrl.startsWith("https://")) runCatching {
                         val fallback = JSONObject(fetch(fallbackUrl, mapOf("User-Agent" to PlayerDeviceSource.FALLBACK_USER_AGENT, "Accept-Language" to "zh-CN,zh;q=0.9"), null))
                         val info = fallback.optJSONObject("video_info")?.optJSONObject("data")
                         rows += StreamModels.listRows(info?.optJSONObject("video_list"), info?.str("key_seed")?.takeIf { it.isNotEmpty() }?.let(StreamModels::lenientB64))
-                    }.onFailure { if(it is PlaybackBudgetExceededException) throw it; RequestScope.ensureActive() }
+                    }.onFailure { if(PlaybackFailure.terminal(it)) throw it; RequestScope.ensureActive(); transportFailure=it as? Exception ?: IOException("备用资源失败",it) }
                 }
-                if (rows.any { it.quality == maxQuality }) return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality)
+                if (rows.any { it.quality == maxQuality }) return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows)
             } catch (e: DeviceRejectedException) { rejected = true }
-            catch (e: EmptyPlaybackException) { emptyResponses++ }
-            catch (e: Exception) { RequestScope.ensureActive(); if(e is PlaybackBudgetExceededException) throw e; transportFailure = e }
+            catch (e: EmptyPlaybackException) { emptyEndpoints.add(index) }
+            catch (e: Exception) { RequestScope.ensureActive(); if(e is PlaybackBudgetExceededException) throw e; if(PlaybackFailure.terminal(e)) terminalFailure=e else transportFailure = e }
         }
         val chosen = StreamModels.pick(rows, maxQuality)
             ?: run {
+                if (terminalFailure != null) throw terminalFailure
+                if (incompatibleModel) throw NoCompatibleStreamException()
                 if (rejected) throw DeviceRejectedException("播放设备已被上游拒绝")
                 if (transportFailure != null) throw transportFailure
-                if (emptyResponses == requests.size) throw EmptyPlaybackException()
+                if (emptyEndpoints.size == requests.size) {
+                    if(PlaybackRequestBudget.current.get()?.claimTabFallback()==true) return tabStream(id,maxQuality,device)
+                    throw EmptyPlaybackException()
+                }
                 if (!sawResponse) throw IOException("播放接口暂不可用")
-                throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+                throw NoCompatibleStreamException()
             }
-        return streamInfo(chosen, maxQuality)
+        return streamInfo(chosen, maxQuality, rows)
     }
-    private fun streamInfo(chosen: PlayerVariant, maxQuality: Int): StreamInfo {
+    /** Single-episode fallback, only after two definitive empty endpoint results.
+     * One GET per shared foreground budget; never picks another episode's model. */
+    private fun tabStream(id: String,maxQuality: Int,device: PlayerDevice): StreamInfo {
+        val values=VendorConstants.device.toMutableMap().apply {
+            put("device_id",device.deviceId);put("iid",device.installId)
+            put("version_code","71532");put("version_name","7.1.5.32")
+            put("video_id",id);put("video_id_type","0");put("device_level","1")
+            put("need_all_video_definition","1");put("need_mp4_align","0")
+            put("use_os_player","0");put("video_platform","1024");put("source","0");put("from_video_id","")
+            put("_rticket",clock().toString())
+        }
+        val url="https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/?"+Signer.encode(values)
+        val raw=fetch(url,mapOf("User-Agent" to VendorConstants.VIDEO_UA,"Accept" to "application/json; charset=utf-8"),null)
+        if(raw.isBlank()) throw EmptyPlaybackException()
+        val data=playerJson(raw)
+        val code=(if(data.has("code")) data.opt("code") else data.opt("Code"))?.toString()?.toIntOrNull()
+            ?: throw PlaybackModelException("备用播放状态格式异常")
+        if(code!=0) throw IOException("备用播放接口暂不可用")
+        val payload=data.optJSONObject("data") ?: throw PlaybackModelException("备用播放数据格式异常")
+        if(payload.length()==0) throw EmptyPlaybackException()
+        val map=payload.optJSONObject("video_model_data") ?: payload
+        val models=StreamModels.models(map,id,false)
+        if(models.isEmpty()) throw PlaybackModelException("备用播放模型缺失或分集不匹配")
+        val rows=models.flatMap { StreamModels.listRows(it.optJSONObject("video_list"),StreamModels.keySeed(it))+StreamModels.arrayRows(it.optJSONArray("video_list")) }
+        if(models.all { it.length()==0 || ((it.optJSONObject("video_list")?.length() ?: it.optJSONArray("video_list")?.length() ?: -1)==0 && StreamModels.fallbackApiUrl(it).isEmpty()) }) throw EmptyPlaybackException()
+        val selected=StreamModels.pick(rows,maxQuality) ?: throw NoCompatibleStreamException()
+        return streamInfo(selected,maxQuality,rows)
+    }
+
+    private fun playerJson(raw: String): JSONObject = try { JSONObject(raw) }
+        catch(error: org.json.JSONException) { throw PlaybackModelException("播放响应格式异常") }
+
+    private fun streamInfo(chosen: PlayerVariant, maxQuality: Int, rows: List<PlayerVariant>): StreamInfo {
         val quality = if (chosen.quality > 0) "${chosen.quality}P" + (if (chosen.quality > maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(chosen.url, chosen.key, quality)
+        return StreamInfo(chosen.url, chosen.key, quality, rows.map { it.quality }.filter { it>0 }.distinct().sortedDescending(), chosen.quality)
     }
     private fun fetch(url: String, headers: Map<String, String>, body: ByteArray?): String {
         val request = Request.Builder().url(url).header("Accept-Language", "zh-CN,zh;q=0.9")
@@ -312,13 +354,13 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val rows=videoList.keys().asSequence().mapNotNull { k -> videoList.optJSONObject(k)?.let { k to it } }.filter {
             it.second.str("main_url").isNotEmpty() && it.second.str("codec_type").lowercase() !in setOf("bytevc2","bvc2")
         }.map { (k,o) -> Triple(qualityNumber(o.str("quality_desc").ifEmpty { o.str("height").ifEmpty { o.str("vheight").ifEmpty { o.str("quality").ifEmpty { k } } } }),k,o) }.sortedByDescending { it.first }.toList()
-        val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+        val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: throw NoCompatibleStreamException()
         val item=selected.third; var url=cleanUrl(item.str("main_url")); val seed=info.str("key_seed")
         if(seed.isNotEmpty()) url=MediaCrypto.decryptUrl(url,decode64(seed))
         if(!url.startsWith("https://") && !url.startsWith("http://")) throw IOException("播放地址无效")
         val key=item.str("spade_a").takeIf { it.isNotEmpty() }?.let(MediaCrypto::deriveKey)
         val quality=if(selected.first>0) "${selected.first}P"+(if(selected.first>maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url,key,quality)
+        return StreamInfo(url,key,quality,rows.map { it.first }.filter { it>0 }.distinct().sortedDescending(),selected.first)
     }
     companion object {
         @Volatile var deviceStore: PlayerDeviceStore? = null
