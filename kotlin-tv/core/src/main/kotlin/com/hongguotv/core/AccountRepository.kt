@@ -23,6 +23,9 @@ private const val FAVORITES_API = "https://api5-normal-sinfonlineb.fqnovel.com/r
 private const val RESERVATIONS_API = "https://api5-normal-sinfonlineb.fqnovel.com/reading/user/subscribe/list/v1/"
 private const val RESERVATION_API = "https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/search/uncover_subscribe/v:version/"
 /** 扫码登录二维码；只把图片和过期时间交给界面，二维码 token 留在 repository 内。 */
+/** Credentials may still be valid; do not log out or infer account provisioning from one missing field. */
+class AccountProfileUnavailableException: IOException("账号资料缺少用户标识，暂不能读取云端收藏。请先刷新账号资料；仍为空时，可在官方红果 App 检查账号后重试。当前登录与本机记录已保留。")
+
 data class LoginQr(val image: String, val expiresAt: Long) {
     override fun toString() = "LoginQr(expiresAt=$expiresAt,image=${image.length}chars)"
 }
@@ -480,7 +483,7 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
     fun accountFavorites(): AccountPage {
         val session=currentSession() ?: throw IOException("请先登录")
         val userId=session.user.accountId
-        if(userId.isBlank()) throw IOException("账号资料缺少用户标识，请到账号页刷新资料后重试")
+        if(userId.isBlank()) throw AccountProfileUnavailableException()
         val values=recentOfficialValues().also { map ->
             map["server_time"]=(clock()/1000).toString()
             map["target_user_id"]=userId

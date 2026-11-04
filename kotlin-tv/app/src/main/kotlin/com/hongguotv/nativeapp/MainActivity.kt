@@ -73,6 +73,7 @@ class MainActivity: Activity() {
     }
 
     private val networkCleanup=Executors.newSingleThreadExecutor()
+    private val preloadStatistics=PreloadStatistics.session
     private val preloadPreferences by lazy { PreloadPreferences(this) }
     private var preloadConfig=PreloadSettings()
     private val preloadClock=PreloadCheckClock()
@@ -143,6 +144,7 @@ class MainActivity: Activity() {
     private val resumeCards=mutableListOf<View>()
     private var episodePanel: EpisodePanel?=null
     private val recovery=RecoveryBudget()
+    private var recoveryQuality: Pair<String,Int>?=null
     private var retryPending=false
     private var autoRecovery=false
     private var startPosition=0L
@@ -824,7 +826,11 @@ class MainActivity: Activity() {
             }
         }
         refreshPreloadLabels()
-        val preloadButtons=listOf(enabledButton,modeButton,thresholdButton,intervalButton)
+        val statsButton=setting(preloadGroup,"本次运行的预加载统计") {
+            val stats=preloadStatistics.snapshot()
+            tvTools.info("预加载统计","完整缓存接管：${stats.complete} 次\n部分缓存接管：${stats.partial} 次\n未使用预加载：${stats.uncached} 次\n自动队列换集：${stats.natural} 次\n当前待播缓存：${upcoming.count()} 项 / ${upcoming.cachedBytes()/1048576} MB\n\n统计资源接管，不代表已显示首帧；本次运行有效。",null)
+        }
+        val preloadButtons=listOf(enabledButton,modeButton,thresholdButton,intervalButton,statsButton)
         preloadButtons.forEachIndexed { index,v ->
             v.nextFocusUpId=preloadButtons.getOrNull(index-1)?.id ?: left.last().id
             v.nextFocusDownId=preloadButtons.getOrNull(index+1)?.id ?: v.id
@@ -957,7 +963,7 @@ class MainActivity: Activity() {
         library.setWatched(data.series.id,false)
         if(screen!="player" || recovering) { preloadClock.reset(); preloadCycle=false }
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
-        val prefetched=if(preloadConfig.enabled && !recovering) upcoming.claim("${data.episodes[selectedIndex]}:${library.maxQuality}") else null
+        val prefetched=if(preloadConfig.enabled && !recovering) upcoming.claim("${data.episodes[selectedIndex]}:${recoveryQuality?.takeIf { it.first==data.episodes[selectedIndex] }?.second ?: library.maxQuality}") else null
         bufferingWatchdog.reset(); preloadGate.update(false,0,0); upcoming.yieldToForeground()
         if(preloadConfig.enabled) upcoming.update(data.episodes.drop(selectedIndex+1).map { "$it:${library.maxQuality}" }) else cancelPrefetch()
         saveProgress(); library.flush(); invalidatePage(); favoriteMonitor.stop(); releaseCatalogViews()
@@ -999,17 +1005,19 @@ class MainActivity: Activity() {
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
-        val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
+        val requestedId=data.episodes[episodeIndex]; val maxQuality=recoveryQuality?.takeIf { it.first==requestedId }?.second ?: library.maxQuality; val ticket=generation
         val requestBudget=episodeRequestBudget
+        var acquiredCacheKind=0
         work({
             val cached=if(prefetched!=null) try { prefetched.await(1500) } catch(e: Exception) {
                 RequestScope.ensureActive(); null
             } finally { prefetched.close() } else null
-            cached?.also { it.promote() } ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,requestBudget),preloadGate).let {
+            cached?.also { acquiredCacheKind=if(it.isCacheComplete()) 2 else 1; it.promote() } ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,requestBudget),preloadGate).let {
                 try { it.prepare() } catch(e: Exception) { it.close(); throw e }
             }
         }, { remote ->
             playbackPreparation=null
+            preloadStatistics.acquired(acquiredCacheKind)
             video=remote; quality=remote.info.quality
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
@@ -1069,7 +1077,10 @@ class MainActivity: Activity() {
                     syncMediaSession()
                 }
                 override fun onMediaItemTransition(item: MediaItem?,reason: Int) {
-                    if(active() && item!=null) acceptQueueTransition(item.mediaId)
+                    if(active() && item!=null) {
+                        if(reason==Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && playbackQueue?.remoteFor(item.mediaId)!=null) preloadStatistics.naturalTransition()
+                        acceptQueueTransition(item.mediaId)
+                    }
                 }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean,reason: Int) {
                     if(!active() || playWhenReady || reason!=Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) return
@@ -1130,6 +1141,7 @@ class MainActivity: Activity() {
         val index=data.episodes.indexOf(id)
         if(index<0 || index==episodeIndex) return
         val remote=playbackQueue?.remoteFor(id) ?: return
+        preloadStatistics.acquired(2)
         episodeIndex=index; group=index/20; video=remote; quality=remote.info.quality
         upcoming.consumed("$id:${library.maxQuality}",remote)
         playbackQueue?.advanceTo(id)
@@ -1194,6 +1206,7 @@ class MainActivity: Activity() {
     private fun playerFailure(problem: Throwable) {
         if(playError) return
         recoveryReason=when {
+            generateSequence(problem){it.cause}.any { it is NoCompatibleStreamException } -> "本集未提供兼容的视频编码或清晰度"
             problem is java.net.SocketTimeoutException -> "视频读取或缓冲超时"
             problem is java.net.UnknownHostException -> "内容服务地址解析失败"
             problem.message?.contains("未返回有效数据")==true -> "播放接口暂时返回空内容"
@@ -1202,14 +1215,18 @@ class MainActivity: Activity() {
         }
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
         saveProgress(); cancelRecovery(); preloadGate.update(false,0,0); preloadGate.failed(problem); upcoming.yieldToForeground()
+        val lowerQualities=PlaybackFailure.lowerQualities(video?.info)
         if(PlaybackRecoveryPolicy.needsNewAddress(problem)) { video=null } else video?.cancelReads()
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
         val decoding=problem is PlaybackException && problem.errorCode in 3000..4999
-        val retryable=if(problem is PlaybackException) problem.errorCode in 2000..2999 || problem.errorCode==PlaybackException.ERROR_CODE_TIMEOUT else problem is java.io.IOException
-        playbackText.text=if(decoding) "电视无法解码当前视频，可尝试更低清晰度。" else "播放失败，可重试或切换清晰度。"
+        val retryable=!PlaybackFailure.terminal(problem) && (if(problem is PlaybackException) problem.errorCode in 2000..2999 || problem.errorCode==PlaybackException.ERROR_CODE_TIMEOUT else problem is java.io.IOException)
+        playbackText.text=if(PlaybackFailure.terminal(problem)) recoveryReason else if(decoding) "电视无法解码当前视频，可尝试更低清晰度。" else "播放失败，可重试或切换清晰度。"
         val actions=row(); controls.addView(actions)
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
-        addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
+        lowerQualities.forEach { target -> addButton(actions,"尝试 ${target}P") {
+            detail?.episodes?.getOrNull(episodeIndex)?.let { recoveryQuality=it to target }
+            playEpisode(episodeIndex,retryPosition,retryAutoplay)
+        } }
         addButton(actions,"返回选集") { returnToDetail(true) }
         if(retryable && !sleepStopped && generateSequence(problem){it.cause}.none { it is PlaybackBudgetExceededException }) {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
@@ -1363,8 +1380,8 @@ class MainActivity: Activity() {
         val options=PlaybackQuality.options
         val dialog=AlertDialog.Builder(this).setTitle("全局默认清晰度")
             .setSingleChoiceItems(options.map { "${it}P" }.toTypedArray(),options.indexOf(library.maxQuality)) { popup,index ->
-                val target=options[index]; val changed=library.maxQuality!=target
-                library.maxQuality=target; popup.dismiss()
+                val target=options[index]; val changed=library.maxQuality!=target || (inPlayer && recoveryQuality!=null)
+                library.maxQuality=target; recoveryQuality=null; popup.dismiss()
                 if(anchor.tag!="playback-settings") anchor.text=(if(inPlayer) "清晰度 " else "默认清晰度  ·  ")+"${target}P"
                 if(inPlayer && changed) playEpisode(episodeIndex,currentPosition(),player?.playWhenReady ?: requestedAutoplay)
             }.setNegativeButton("取消",null).create()

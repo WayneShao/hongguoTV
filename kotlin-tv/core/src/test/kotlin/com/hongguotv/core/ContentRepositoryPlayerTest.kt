@@ -42,12 +42,79 @@ class ContentRepositoryPlayerTest {
     private fun entry(height: Int, codec: String, url: String, width: Int = 0) = JSONObject()
         .put("vheight", height).put("vwidth", width).put("codec_type", codec).put("main_url", url)
 
+    @Test fun emptyEstablishedEndpointsUseExactEpisodeTabFallbackOncePerBudget() {
+        var tabCalls=0
+        val (repo,store)=repository { request ->
+            if(request.url.encodedPath.contains("video_tab")) {
+                tabCalls++;assertEquals("GET",request.method)
+                assertEquals("123",request.url.queryParameter("video_id"))
+                assertEquals("7000000000001234567",request.url.queryParameter("device_id"))
+                assertEquals("1",request.url.queryParameter("device_level"))
+                """{"code":0,"data":{"video_model_data":{"123":{"video_model":{"video_list":[{"video_meta":{"vwidth":854,"vheight":480,"codec_type":"h264"},"main_url":"https://example.com/tab"}]}}}}}"""
+            } else """{"code":0,"data":{}}"""
+        }
+        val budget=PlaybackRequestBudget(8,0)
+        assertEquals("https://example.com/tab",repo.stream("123",480,budget).url)
+        assertEquals(1,tabCalls);assertTrue(store.saved.isEmpty())
+        assertThrows(IOException::class.java){repo.stream("123",480,budget)}
+        assertEquals(1,tabCalls)
+    }
+
+    @Test fun malformedResponsesNeverAuthorizeTabOrIdentityRotation() {
+        for(body in listOf("{}","{broken","{\"code\":0}","{\"code\":0,\"data\":{\"123\":{}}}")) {
+            var tabCalls=0
+            val (repo,store)=repository { request ->
+                if(request.url.encodedPath.contains("video_tab")) tabCalls++
+                body
+            }
+            assertThrows(PlaybackModelException::class.java){repo.stream("123",480)}
+            assertEquals(0,tabCalls);assertTrue(store.saved.isEmpty())
+        }
+    }
+
+    @Test fun malformedResponseSurvivesMixedTimeoutOrRejectionWithoutLegacyOrRotation() {
+        for(rejected in listOf(false,true)) {
+            var calls=0
+            val (repo,store)=repository { request ->
+                calls++
+                if(request.url.host.startsWith("api3-")) "{broken"
+                else if(rejected) """{"code":110001,"data":{}}"""
+                else throw java.net.SocketTimeoutException()
+            }
+            assertThrows(PlaybackModelException::class.java){repo.stream("123",480,PlaybackRequestBudget(8,0))}
+            assertEquals(2,calls);assertTrue(store.saved.isEmpty())
+        }
+    }
+
+    @Test fun wrongEpisodeFromTabIsNeverPlayedOrPersisted() {
+        val (repo,store)=repository { request ->
+            if(request.url.encodedPath.contains("video_tab"))
+                """{"code":0,"data":{"video_model_data":{"999":{"video_model":{"video_list":[{"vheight":480,"codec_type":"h264","main_url":"https://example.com/wrong"}]}}}}}"""
+            else """{"code":0,"data":{}}"""
+        }
+        assertThrows(IOException::class.java){repo.stream("123",480,PlaybackRequestBudget(8,0))}
+        assertTrue(store.saved.isEmpty())
+    }
+
+    @Test fun incompatibleModelStopsWithoutLegacyFallbackOrIdentityRotation() {
+        var calls=0
+        val (repo,store)=repository { request ->
+            calls++
+            val model=JSONObject().put("video_list",list(entry(480,"bytevc2","https://example.com/vvc")))
+            JSONObject().put("code",0).put("data",if(request.url.host.startsWith("api3-")) JSONObject().put("video_model",model) else JSONObject().put("123",JSONObject().put("video_model",model))).toString()
+        }
+        val failure=assertThrows(IOException::class.java){repo.stream("123",480)}
+        assertEquals("NoCompatibleStreamException",failure.javaClass.simpleName)
+        assertEquals(2,calls)
+        assertTrue(store.saved.isEmpty())
+    }
+
     @Test fun failedEndpointsAndAutomaticRecoveryShareOneRequestCeiling() {
         var requests=0
-        val (repo,_)=repository { request -> if(request.url.host.endsWith("fqnovel.com")) requests++;"{}" }
+        val (repo,_)=repository { request -> if(request.url.host.endsWith("fqnovel.com")) requests++;"""{"code":0,"data":{}}""" }
         val budget=PlaybackRequestBudget(5,0)
         assertThrows(Exception::class.java) {repo.stream("123",480,budget)}
-        assertEquals(3,requests)
+        assertEquals(4,requests)
         assertThrows(PlaybackBudgetExceededException::class.java) {repo.stream("123",480,budget)}
         assertEquals(5,requests)
         assertThrows(PlaybackBudgetExceededException::class.java) {repo.stream("123",480,budget)}
@@ -231,10 +298,12 @@ class ContentRepositoryPlayerTest {
         }
         assertThrows(IOException::class.java) { repo.stream("123",720,PlaybackRequestBudget(8,0)) }
         assertEquals(0,registrations)
+        val firstRoundCalls=modelCalls
+        assertTrue(firstRoundCalls<=8)
         assertEquals("https://example.com/recovered",repo.stream("123",720).url)
         assertEquals(1,registrations)
         assertEquals("789",PlayerDevice.fromJson(store.value!!)!!.deviceId)
-        assertTrue(modelCalls<=8)
+        assertTrue(modelCalls-firstRoundCalls<=8)
     }
     @Test fun emptyAndTransportOrMalformedOrUnsupportedNeverRotate() {
         for(other in listOf("timeout","{broken", "unsupported")) {
@@ -270,7 +339,7 @@ class ContentRepositoryPlayerTest {
                         val info=JSONObject().put("video_id",mediaId).put("video_list",list(entry(720,"h264","https://example.com/right")))
                         JSONObject().put("video_info",JSONObject().put("data",info)).toString()
                     }
-                    else -> "{malformed"
+                    else -> """{"code":0,"data":{}}"""
                 }
             }
             assertEquals("https://example.com/right",repo.stream("123",720).url)

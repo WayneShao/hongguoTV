@@ -145,6 +145,8 @@ class AccountTest {
         }
         val error=assertThrows(java.io.IOException::class.java) { repo.accountFavorites() }
         assertTrue(error.message.orEmpty().contains("用户标识"))
+        assertEquals("AccountProfileUnavailableException",error.javaClass.simpleName)
+        assertNotNull(repo.currentSession())
     }
 
     @Test fun reserveAndCancelUseObservedOpTypesAndBody() {
