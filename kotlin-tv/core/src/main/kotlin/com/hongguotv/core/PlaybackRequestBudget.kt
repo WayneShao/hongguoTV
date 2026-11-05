@@ -5,6 +5,11 @@ class PlaybackBudgetExceededException: java.io.IOException("本集播放地址�
 class PlaybackRequestBudget(private val maxRequests: Int=8, private val maxRetries: Int=2) {
     private var requests=0
     private var retries=0
+    private var codecAttempted=false
+    @Synchronized fun claimCodecFallback(): Boolean {
+        if(codecAttempted || requests>=maxRequests) return false
+        codecAttempted=true;return true
+    }
     private var tabAttempted=false
     @Synchronized fun claimTabFallback(): Boolean {
         if(tabAttempted || requests>=maxRequests) return false

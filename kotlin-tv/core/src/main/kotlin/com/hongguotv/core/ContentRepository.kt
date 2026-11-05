@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package com.hongguotv.core
 
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -242,8 +243,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                     val fallbackUrl = StreamModels.fallbackApiUrl(model)
                     if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) emptyEndpoints.add(index)
                     if (fallbackUrl.startsWith("https://")) runCatching {
-                        val fallback = JSONObject(fetch(fallbackUrl, mapOf("User-Agent" to PlayerDeviceSource.FALLBACK_USER_AGENT, "Accept-Language" to "zh-CN,zh;q=0.9"), null))
-                        val info = fallback.optJSONObject("video_info")?.optJSONObject("data")
+                        val info = fallbackInfo(fallbackUrl)
                         rows += StreamModels.listRows(info?.optJSONObject("video_list"), info?.str("key_seed")?.takeIf { it.isNotEmpty() }?.let(StreamModels::lenientB64))
                     }.onFailure { if(PlaybackFailure.terminal(it)) throw it; RequestScope.ensureActive(); transportFailure=it as? Exception ?: IOException("备用资源失败",it) }
                 }
@@ -294,6 +294,21 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(models.all { it.length()==0 || ((it.optJSONObject("video_list")?.length() ?: it.optJSONArray("video_list")?.length() ?: -1)==0 && StreamModels.fallbackApiUrl(it).isEmpty()) }) throw EmptyPlaybackException()
         val selected=StreamModels.pick(rows,maxQuality) ?: throw NoCompatibleStreamException()
         return streamInfo(selected,maxQuality,rows)
+    }
+
+    private fun fallbackInfo(url: String,userAgent: String=PlayerDeviceSource.FALLBACK_USER_AGENT): JSONObject {
+        fun read(target: String): JSONObject = playerJson(fetch(target, mapOf("User-Agent" to userAgent,"Accept-Language" to "zh-CN,zh;q=0.9"), null))
+            .optJSONObject("video_info")?.optJSONObject("data") ?: throw PlaybackModelException("没有播放资源")
+        val original=read(url)
+        if(!StreamModels.allByteVc2(original) || PlaybackRequestBudget.current.get()?.claimCodecFallback()!=true) return original
+        val compatible=url.toHttpUrl().newBuilder().setQueryParameter("codec_type","0")
+            .setQueryParameter("force_codec","h264").build().toString()
+        // Hints are not evidence: normal selection checks the returned codec again.
+        return try { read(compatible) } catch(error: Exception) {
+            RequestScope.ensureActive()
+            if(error is PlaybackBudgetExceededException) throw error
+            throw NoCompatibleStreamException()
+        }
     }
 
     private fun playerJson(raw: String): JSONObject = try { JSONObject(raw) }
@@ -347,12 +362,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val raw=model.opt("fallback_api") ?: throw EmptyPlaybackException()
         val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
         if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
-        val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")
+        val info=fallbackInfo(fallback,VendorConstants.VIDEO_UA)
         val videoList=info.optJSONObject("video_list") ?: throw IOException("没有可用清晰度")
         // ByteVC2 resources can expose playable audio but no video track in Android's MP4 extractor.
         // Keep missing legacy codec labels usable, but never select a known incompatible variant.
         val rows=videoList.keys().asSequence().mapNotNull { k -> videoList.optJSONObject(k)?.let { k to it } }.filter {
-            it.second.str("main_url").isNotEmpty() && it.second.str("codec_type").lowercase() !in setOf("bytevc2","bvc2")
+            it.second.str("main_url").isNotEmpty() && StreamModels.qualityScore(it.second)!=null
         }.map { (k,o) -> Triple(qualityNumber(o.str("quality_desc").ifEmpty { o.str("height").ifEmpty { o.str("vheight").ifEmpty { o.str("quality").ifEmpty { k } } } }),k,o) }.sortedByDescending { it.first }.toList()
         val selected=rows.firstOrNull { it.first<=maxQuality } ?: rows.lastOrNull() ?: throw NoCompatibleStreamException()
         val item=selected.third; var url=cleanUrl(item.str("main_url")); val seed=info.str("key_seed")

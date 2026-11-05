@@ -74,6 +74,7 @@ class MainActivity: Activity() {
 
     private val networkCleanup=Executors.newSingleThreadExecutor()
     private val preloadStatistics=PreloadStatistics.session
+    private var playbackMeasurement: com.hongguotv.core.PlaybackSessionMeasurement?=null
     private val preloadPreferences by lazy { PreloadPreferences(this) }
     private var preloadConfig=PreloadSettings()
     private val preloadClock=PreloadCheckClock()
@@ -86,9 +87,13 @@ class MainActivity: Activity() {
     private val prefetchDirectory by lazy { java.io.File(cacheDir,"episode-prefetch").also { dir ->
         dir.mkdirs(); dir.listFiles()?.filter { it.name.startsWith("hongguo-prefetch-") && it.extension=="part" }?.forEach { it.delete() }
     } }
+    private val batchTransport by lazy { BatchModelTransport(prefetchHttp.newBuilder().callTimeout(8,java.util.concurrent.TimeUnit.SECONDS).build()) }
+    private val batchModels by lazy { BatchModelPrefetch(prefetchWorker,preloadGate,batchTransport::identity,{library.maxQuality},batchTransport::fetch) }
+    private fun takeBatchModel(id: String,quality: Int): StreamInfo? = if(preloadConfig.enabled && preloadConfig.batchModels)
+        batchTransport.identity()?.let {batchModels.cache.take(it,id,quality)} else null
     private val upcoming by lazy { EpisodePreloader(prefetchWorker,prefetchHttp,{prefetchDirectory},
-        resolve={key -> repository.stream(key.substringBefore(':'),key.substringAfter(':').toInt(),PlaybackRequestBudget(8,2))},
-        gate=preloadGate,clock={android.os.SystemClock.elapsedRealtime()}) }
+        resolve={key -> takeBatchModel(key.substringBefore(':'),key.substringAfter(':').toInt()) ?: repository.stream(key.substringBefore(':'),key.substringAfter(':').toInt(),PlaybackRequestBudget(8,2))},
+        gate=preloadGate,clock={android.os.SystemClock.elapsedRealtime()},batchModels=batchModels) }
     private var playbackPreparation: PendingPreparation<RemoteVideo>?=null
     private var playbackHttp: okhttp3.OkHttpClient?=null
     private var readySince=0L
@@ -797,8 +802,10 @@ class MainActivity: Activity() {
         lateinit var enabledButton: TextView
         lateinit var modeButton: TextView
         lateinit var thresholdButton: TextView
+        lateinit var batchButton: TextView
         lateinit var intervalButton: TextView
         fun refreshPreloadLabels() {
+            batchButton.text="批量预取播放信息（实验） · ${if(preloadConfig.batchModels) "开启" else "关闭"}"
             enabledButton.text="预加载开关  ·  ${if(preloadConfig.enabled) "开启" else "关闭"}"
             val timed=preloadConfig.mode==PreloadMode.TIME
             modeButton.text="预加载模式  ·  ${if(timed) "按时间" else "按集数"}"
@@ -830,12 +837,13 @@ class MainActivity: Activity() {
                 savePreload(if(timed) preloadConfig.copy(checkMinutes=values[it]) else preloadConfig.copy(checkEpisodes=values[it]))
             }
         }
+        batchButton=setting(preloadGroup,"") { savePreload(preloadConfig.copy(batchModels=!preloadConfig.batchModels)) }
         refreshPreloadLabels()
         val statsButton=setting(preloadGroup,"本次运行的预加载统计") {
             val stats=preloadStatistics.snapshot()
-            tvTools.info("预加载统计","完整缓存接管：${stats.complete} 次\n部分缓存接管：${stats.partial} 次\n未使用预加载：${stats.uncached} 次\n自动队列换集：${stats.natural} 次\n当前待播缓存：${upcoming.count()} 项 / ${upcoming.cachedBytes()/1048576} MB\n\n统计资源接管，不代表已显示首帧；本次运行有效。",null)
+            tvTools.info("预加载统计","完整缓存接管：${stats.complete} 次\n部分缓存接管：${stats.partial} 次\n未使用预加载：${stats.uncached} 次\n自动队列换集：${stats.natural} 次\n当前待播缓存：${upcoming.count()} 项 / ${upcoming.cachedBytes()/1048576} MB\n\n实际首帧启动：${stats.renderedStarts} 次 / 平均 ${if(stats.renderedStarts>0) "${stats.startupMs/stats.renderedStarts} ms" else "暂无"}\n播放中缓冲：${stats.bufferingCount} 次 / ${stats.bufferingMs} ms\n自然换集首帧间隔：暂不可测（连续渲染缺少逐集首帧回调）\n\n首帧仅计显式启动且未暂停/跳转的请求，续播定位及其他 seek 启动不计入，含取流时间；缓冲排除启动、暂停、播放抑制和跳转，累计已结束的有效区间（抑制前后分段计次）。本次运行有效，不设播放时长成功门槛。",null)
         }
-        val preloadButtons=listOf(enabledButton,modeButton,thresholdButton,intervalButton,statsButton)
+        val preloadButtons=listOf(enabledButton,modeButton,thresholdButton,intervalButton,batchButton,statsButton)
         preloadButtons.forEachIndexed { index,v ->
             v.nextFocusUpId=preloadButtons.getOrNull(index-1)?.id ?: left.last().id
             v.nextFocusDownId=preloadButtons.getOrNull(index+1)?.id ?: v.id
@@ -969,6 +977,7 @@ class MainActivity: Activity() {
         library.setWatched(data.series.id,false)
         if(screen!="player" || recovering) { preloadClock.reset(); preloadCycle=false }
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
+        val prefetchedModel=if(!recovering) takeBatchModel(data.episodes[selectedIndex],recoveryQuality?.takeIf { it.first==data.episodes[selectedIndex] }?.second ?: library.maxQuality) else null
         val prefetched=if(preloadConfig.enabled && !recovering) upcoming.claim("${data.episodes[selectedIndex]}:${recoveryQuality?.takeIf { it.first==data.episodes[selectedIndex] }?.second ?: library.maxQuality}") else null
         bufferingWatchdog.reset(); preloadGate.update(false,0,0); upcoming.yieldToForeground()
         if(preloadConfig.enabled) upcoming.update(data.episodes.drop(selectedIndex+1).map { "$it:${library.maxQuality}" }) else cancelPrefetch()
@@ -983,6 +992,9 @@ class MainActivity: Activity() {
         } else releasePlayer(keepUpcoming=true)
         artwork.cancelPage(clearMemory=true)
         playbackHttp=null; video=null
+        playbackMeasurement?.close(android.os.SystemClock.elapsedRealtime())
+        val measurement=com.hongguotv.core.PlaybackSessionMeasurement(preloadStatistics,playbackStarted)
+        playbackMeasurement=measurement
         var firstReady=true; var firstFrame=true
         completedEpisodes.clear(); rejectedQueueItems.clear(); currentEpisodeDuration=0
         if(!recovering) { recovery.reset(); episodeRequestBudget=PlaybackRequestBudget() }
@@ -1019,7 +1031,7 @@ class MainActivity: Activity() {
             val cached=if(prefetched!=null) try { prefetched.await(1500) } catch(e: Exception) {
                 RequestScope.ensureActive(); null
             } finally { prefetched.close() } else null
-            cached?.also { acquiredCacheKind=if(it.isCacheComplete()) 2 else 1; it.promote() } ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,requestBudget),preloadGate).let {
+            cached?.also { acquiredCacheKind=if(it.isCacheComplete()) 2 else 1; it.promote() } ?: RemoteVideo(repository.http,prefetchedModel ?: repository.stream(requestedId,maxQuality,requestBudget),preloadGate).let {
                 try { it.prepare() } catch(e: Exception) { it.close(); throw e }
             }
         }, { remote ->
@@ -1038,8 +1050,10 @@ class MainActivity: Activity() {
             p.setPlaybackSpeed(library.playbackSpeed)
             val listener=object: Player.Listener {
                 private fun active()=player===p && generation==ticket && screen=="player"
+                private fun measure() { measurement.state(android.os.SystemClock.elapsedRealtime(),p.playbackState==Player.STATE_BUFFERING,p.playWhenReady && foreground && !pausedForLifecycle && p.playbackSuppressionReason==Player.PLAYBACK_SUPPRESSION_REASON_NONE) }
                 override fun onPlaybackStateChanged(state: Int) {
                     if(!active()) return
+                    measure()
                     if(state!=Player.STATE_BUFFERING) bufferingWatchdog.reset()
                     if(state==Player.STATE_READY) {
                         if(!p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
@@ -1063,13 +1077,17 @@ class MainActivity: Activity() {
                 override fun onRenderedFirstFrame() {
                     if(active() && firstFrame) {
                         firstFrame=false
+                        if(!p.playWhenReady || !foreground) measurement.interrupted(android.os.SystemClock.elapsedRealtime())
+                        measurement.firstFrame(android.os.SystemClock.elapsedRealtime())
                         android.util.Log.i("HongguoTV","Playback first frame episode=${episodeIndex+1} preloaded=${prefetched!=null} reused=$reuse elapsedMs=${android.os.SystemClock.elapsedRealtime()-playbackStarted}")
                     }
                 }
-                override fun onIsPlayingChanged(playing: Boolean) { if(active()) { if(hud.visibility==View.VISIBLE) showHud(); syncMediaSession() } }
+                override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) { if(active()) measure() }
+                override fun onIsPlayingChanged(playing: Boolean) { if(active()) { measure(); if(hud.visibility==View.VISIBLE) showHud(); syncMediaSession() } }
                 override fun onPlaybackParametersChanged(parameters: PlaybackParameters) { if(active()) syncMediaSession() }
                 override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo,newPosition: Player.PositionInfo,reason: Int) {
                     if(!active()) return
+                    if(reason==Player.DISCONTINUITY_REASON_SEEK || reason==Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) measurement.seek(android.os.SystemClock.elapsedRealtime())
                     val oldId=oldPosition.mediaItem?.mediaId
                     val newId=newPosition.mediaItem?.mediaId
                     if(oldId!=newId && oldId!=null && newId!=null) {
@@ -1085,11 +1103,14 @@ class MainActivity: Activity() {
                 }
                 override fun onMediaItemTransition(item: MediaItem?,reason: Int) {
                     if(active() && item!=null) {
-                        if(reason==Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && playbackQueue?.remoteFor(item.mediaId)!=null) preloadStatistics.naturalTransition()
+                        if(reason==Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && playbackQueue?.remoteFor(item.mediaId)!=null) {
+                            preloadStatistics.naturalTransition()
+                        }
                         acceptQueueTransition(item.mediaId)
                     }
                 }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean,reason: Int) {
+                    if(active()) { if(!playWhenReady) measurement.interrupted(android.os.SystemClock.elapsedRealtime()); measure() }
                     if(!active() || playWhenReady || reason!=Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) return
                     if(completeEpisode(episodeIndex,p.currentPosition,currentEpisodeDuration)) stopForSleep()
                     else { requestedAutoplay=false; pausedForLifecycle=true; showPanel(); syncMediaSession() }
@@ -1440,6 +1461,7 @@ class MainActivity: Activity() {
 
     }
     private fun releasePlayer(keepUpcoming: Boolean=false) {
+        playbackMeasurement?.close(android.os.SystemClock.elapsedRealtime()); playbackMeasurement=null
         bufferingWatchdog.reset()
         if(!keepUpcoming) cancelPrefetch()
         cancelRecovery(); mediaSession.deactivate(); tvTools.close()
