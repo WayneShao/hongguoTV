@@ -8,6 +8,7 @@ data class PreloadSettings(
     val checkMinutes: Int=1,
     val checkEpisodes: Int=1,
     val enabled: Boolean=false,
+    val batchModels: Boolean=false,
 ) {
     companion object {
         val timeTargets=listOf(1,2,3,5,10,15,20,30)

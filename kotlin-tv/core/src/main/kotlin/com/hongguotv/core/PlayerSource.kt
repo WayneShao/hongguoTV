@@ -127,6 +127,17 @@ internal data class PlayerVariant(val score: Long, val url: String, val key: Byt
 
 /** Model/variant extraction mirroring video.rs; every entry point is pure JSON. */
 internal object StreamModels {
+    /** Unknown or malformed rows do not prove an all-ByteVC2 response. */
+    fun allByteVc2(model: JSONObject): Boolean {
+        val list=model.opt("video_list")
+        val entries=when(list) {
+            is JSONObject -> list.keys().asSequence().map { list.opt(it) }.toList()
+            is JSONArray -> (0 until list.length()).map { list.opt(it) }
+            else -> emptyList()
+        }
+        return entries.isNotEmpty() && entries.all { it is JSONObject && qualityScore(it)==null }
+    }
+
     /** fqapp's video_quality_score: bytevc2 never wins, h264 wins ties. */
     fun qualityScore(info: JSONObject): Long? {
         val codec = buildString {

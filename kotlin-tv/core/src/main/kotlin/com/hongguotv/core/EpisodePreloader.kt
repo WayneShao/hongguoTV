@@ -13,6 +13,7 @@ class EpisodePreloader(
     private val resolve: (String) -> StreamInfo,
     val gate: PreloadGate,
     clock: () -> Long,
+    val batchModels: BatchModelPrefetch? = null,
 ) : Closeable {
     @Volatile private var active: RemoteVideo?=null
     @Volatile private var activeClaim: ClaimSignal?=null
@@ -53,9 +54,9 @@ class EpisodePreloader(
             false
         }
     }
-    fun configure(config: PreloadSettings)=window.configure(config)
-    fun update(keys: List<String>)=window.update(keys)
-    fun pump(): Boolean=window.pump()
+    fun configure(config: PreloadSettings) { batchModels?.configure(config);window.configure(config) }
+    fun update(keys: List<String>) { batchModels?.update(keys);window.update(keys) }
+    fun pump(): Boolean { batchModels?.pump();return window.pump() }
     fun claim(key: String): PendingPreparation<RemoteVideo>?=window.claim(key)
     fun claimCompleted(key: String): RemoteVideo?=window.claimCompleted(key)
     fun consumed(key: String)=window.consumed(key)
@@ -66,6 +67,6 @@ class EpisodePreloader(
     fun cachedBytes(): Long=window.cachedBytes()
     fun retainedBytes(): Long=window.retainedBytes()
     fun count(): Int=window.count()
-    fun yieldToForeground() { if(activeClaim?.invoke()!=true) active?.yieldToForeground() }
-    override fun close() { gate.update(false,0,0); window.close() }
+    fun yieldToForeground() { batchModels?.yieldToForeground();if(activeClaim?.invoke()!=true) active?.yieldToForeground() }
+    override fun close() { batchModels?.close();gate.update(false,0,0); window.close() }
 }
