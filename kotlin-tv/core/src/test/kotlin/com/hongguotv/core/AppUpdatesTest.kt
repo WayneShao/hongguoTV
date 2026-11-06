@@ -69,7 +69,8 @@ class AppUpdatesTest {
     @Test fun liveReleaseSnapshotUsesExactVersionsAndSupportsFullSize() {
         val path=System.getenv("HONGGUO_RELEASE_FIXTURE") ?: return
         val json=File(path).readText()
-        for((pkg,voice) in listOf("com.hongguotv.nativeapp" to false,"com.hongguotv.rayneo" to false,"com.hongguotv.rayneo" to true)) {
+        // API21 TV parsing is verified in tv/android5-preview; this branch ships glasses.
+        for((pkg,voice) in listOf("com.hongguotv.rayneo" to false,"com.hongguotv.rayneo" to true)) {
             val parsed=AppUpdate.parseLatestRelease(json,pkg,voice)
             assertTrue(parsed.versionName.endsWith(if(pkg.endsWith("nativeapp")) "-local" else if(voice) "-rayneo-full" else "-rayneo-keyboard"))
             assertTrue(parsed.sha256.length==64)
