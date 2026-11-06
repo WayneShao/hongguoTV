@@ -40,6 +40,8 @@ class MainActivity: Activity() {
     private val accountOwners by lazy { getSharedPreferences("account-local-progress-owners",Context.MODE_PRIVATE) }
     private var playbackAccount: AuthSession?=null
     private var accountReturn=false
+    private var detailLocalSelection=true
+    private fun detailProgress(id: String)=ResumePlayback.progress(detailLocalSelection,library.progress(id),if(detailLocalSelection) null else accountProgress(id))
     private var accountReturnSection: String?=null
     private val accountHistorySync by lazy { AccountHistorySync(this,accountRepository) { session,rows ->
         if(!isDestroyed && accountRepository.currentSession()?.user?.id==session.user.id) {
@@ -294,7 +296,7 @@ class MainActivity: Activity() {
         library.loadAsync(onFailure={ problem ->
             if(!isDestroyed) { libraryLoadError=problem; if(foreground) showLibraryError(problem) }
         }) {
-            if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check() }
+            if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check(); accountHistorySync.resume(library.history()) }
         }
     }
     private fun base(title: String?=null): LinearLayout {
@@ -886,19 +888,28 @@ class MainActivity: Activity() {
         val capturedAccount=accountRepository.currentSession()
         val chosenHistory=cloudHistory[series.id].takeIf { accountReturn && accountReturnSection=="history" && capturedAccount!=null && cloudOwner==capturedAccount.user.id }
         playbackAccount=capturedAccount
+        detailLocalSelection=!accountReturn
+        val selectedProgress=chosenHistory?.let { WatchProgress(it.series,it.episodeId,it.episodeIndex,it.position,it.duration,false,it.readAt) } ?: detailProgress(series.id)
+        val needsAccountLookup=!detailLocalSelection && selectedProgress==null && capturedAccount!=null
         work({
-            val remote=chosenHistory ?: if(capturedAccount!=null) runCatching { accountRepository.accountVideoProgress(capturedAccount) }.getOrNull()
-                ?.firstOrNull { it.seriesId==series.id }?.let { AccountHistoryItem(series,it.episodeId,it.episodeIndex,it.position,0,it.readAt) } else null
+            // Account-only entries may have no cached progress yet. A failed lookup must
+            // remain retryable instead of being mistaken for confirmed absent history.
+            val remote=if(needsAccountLookup) accountRepository.accountVideoProgress(capturedAccount!!)
+                .firstOrNull { it.seriesId==series.id } else null
             repository.detail(series.id) to remote
         }, { loaded ->
             val result=loaded.first
             loaded.second?.let { row -> if(accountRepository.currentSession()?.user?.id==capturedAccount?.user?.id) {
-                cloudOwner=capturedAccount?.user?.id.orEmpty(); if((cloudHistory[row.series.id]?.readAt ?: 0L)<=row.readAt) cloudHistory[row.series.id]=row
+                cloudOwner=capturedAccount?.user?.id.orEmpty()
+                if((cloudHistory[series.id]?.readAt ?: 0L)<=row.readAt) {
+                    cloudHistory[series.id]=AccountHistoryItem(series,row.episodeId,row.episodeIndex,row.position,0,row.readAt)
+                }
             } }
+            val progress=selectedProgress ?: detailProgress(series.id)
             detail=result.copy(series=result.series.copy(bookType=series.bookType.takeIf { it in 2..5 } ?: result.series.bookType))
             library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
-            val progress=chosenHistory?.let { WatchProgress(it.series,it.episodeId,it.episodeIndex,it.position,it.duration,false,it.readAt) } ?: accountProgress(series.id)
-            val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true,progress?.episodeIndex)
+            val target=ResumePlayback.resolve(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true,progress?.episodeIndex)
+            if(target==null) { episodeIndex=0; group=0; showDetail(false); return@work }
             episodeIndex=target.index; group=episodeIndex/20
             if(resume) playEpisode(target.index,target.position,autoplay=detailAutoplay) else showDetail(false)
         }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
@@ -916,11 +927,14 @@ class MainActivity: Activity() {
         val synopsis=text(description,15f,muted).apply { maxLines=if(synopsisExpanded) 20 else 2; ellipsize=TextUtils.TruncateAt.END }
         info.addView(synopsis)
         val actions=row(); actions.setPadding(0,dp(12),0,0); info.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(actions) },lp(-1,-2))
-        val progress=accountProgress(data.series.id)
-        val resumeIndex=ResumePlayback.target(data.episodes,progress?.episodeId,0,false,progress?.episodeIndex).index
-        val resumePosition=ResumePlayback.target(data.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true,progress?.episodeIndex).position
+        val progress=detailProgress(data.series.id)
+        val resumeTarget=ResumePlayback.resolve(data.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true,progress?.episodeIndex)
         val watched=library.watched(data.series.id)
-        val play=addButton(actions,if(watched) "重新观看" else if(progress!=null && !progress.completed) "继续第 ${resumeIndex+1} 集" else "开始观看") { playEpisode(if(watched) 0 else if(progress?.completed==true) (resumeIndex+1).coerceAtMost(data.episodes.lastIndex) else resumeIndex,if(watched) 0 else resumePosition) }
+        if(resumeTarget==null) info.addView(text("原观看记录暂时无法匹配分集，已保留记录。请重试或手动选集。",15f,muted))
+        val play=addButton(actions,if(resumeTarget==null) "重新加载分集" else if(watched) "重新观看" else if(progress!=null && !progress.completed) "继续第 ${resumeTarget.index+1} 集" else "开始观看") {
+            if(resumeTarget==null) openDetail(data.series,resume=true)
+            else playEpisode(if(watched) 0 else resumeTarget.index,if(watched) 0 else resumeTarget.position)
+        }
         lateinit var favorite: TextView
         favorite=addButton(actions,if(library.favorite(data.series.id)) "已收藏" else "收藏") {
             favoriteMonitor.stop()
@@ -1025,7 +1039,7 @@ class MainActivity: Activity() {
             root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(hud) },FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM))
         }
         playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"
-        playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
+        playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hud.visibility=View.VISIBLE
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=recoveryQuality?.takeIf { it.first==requestedId }?.second ?: library.maxQuality; val ticket=generation
