@@ -47,6 +47,11 @@ class ContentRepositoryPlayerTest {
         val (repo,store)=repository { request ->
             if(request.url.encodedPath.contains("video_tab")) {
                 tabCalls++;assertEquals("GET",request.method)
+                assertNull(request.body)
+                assertFalse(request.header("x-argus").isNullOrBlank())
+                assertFalse(request.header("x-khronos").isNullOrBlank())
+                assertFalse(request.header("x-ladon").isNullOrBlank())
+                assertNull(request.header("x-ss-stub"))
                 assertEquals("123",request.url.queryParameter("video_id"))
                 assertEquals("7000000000001234567",request.url.queryParameter("device_id"))
                 assertEquals("1",request.url.queryParameter("device_level"))
