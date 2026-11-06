@@ -178,6 +178,8 @@ class MainActivity: Activity() {
     }
     private lateinit var root: FrameLayout
     private var generation=0
+    private val seasonGate=com.hongguotv.core.SeasonContinuationGate()
+    private var seasonSeekToEnd=false
     private var screen="catalog"
     private var tab=0
     private var page=1
@@ -315,6 +317,7 @@ class MainActivity: Activity() {
         (io as? java.util.concurrent.ThreadPoolExecutor)?.purge()
     }
     private fun invalidatePage() {
+        seasonGate.invalidate()
         accountScreen?.destroy(); accountScreen=null
         generation++; cancelWork(); artwork.cancelPage()
     }
@@ -946,6 +949,7 @@ class MainActivity: Activity() {
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
+        seasonGate.reset();seasonSeekToEnd=false
         updater.interrupt()
         val data=detail ?: return
         val targetId=data.episodes.getOrNull(index)
@@ -1064,7 +1068,7 @@ class MainActivity: Activity() {
                         val stop=completeEpisode(episodeIndex,p.currentPosition,currentEpisodeDuration)
                         if(stop) stopForSleep()
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && !sleepStopped && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
-                        else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
+                        else if(!continueNextSeason(p)) { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
                 }
                 override fun onRenderedFirstFrame() {
@@ -1081,6 +1085,10 @@ class MainActivity: Activity() {
                 override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo,newPosition: Player.PositionInfo,reason: Int) {
                     if(!active()) return
                     if(reason==Player.DISCONTINUITY_REASON_SEEK || reason==Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) measurement.seek(android.os.SystemClock.elapsedRealtime())
+                    if(reason==Player.DISCONTINUITY_REASON_SEEK || reason==Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
+                        seasonGate.invalidate()
+                        seasonSeekToEnd=p.duration>0 && newPosition.positionMs>=p.duration-1000
+                    }
                     val oldId=oldPosition.mediaItem?.mediaId
                     val newId=newPosition.mediaItem?.mediaId
                     if(oldId!=newId && oldId!=null && newId!=null) {
@@ -1103,6 +1111,7 @@ class MainActivity: Activity() {
                     }
                 }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean,reason: Int) {
+                    if(active() && !playWhenReady) abandonSeasonContinuation()
                     if(active()) { if(!playWhenReady) measurement.interrupted(android.os.SystemClock.elapsedRealtime()); measure() }
                     if(!active() || playWhenReady || reason!=Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) return
                     if(completeEpisode(episodeIndex,p.currentPosition,currentEpisodeDuration)) stopForSleep()
@@ -1162,6 +1171,7 @@ class MainActivity: Activity() {
         val index=data.episodes.indexOf(id)
         if(index<0 || index==episodeIndex) return
         val remote=playbackQueue?.remoteFor(id) ?: return
+        seasonGate.reset();seasonSeekToEnd=false
         preloadStatistics.acquired(2)
         episodeIndex=index; group=index/20; video=remote; quality=remote.info.quality
         upcoming.consumed("$id:${library.maxQuality}",remote)
@@ -1224,7 +1234,46 @@ class MainActivity: Activity() {
         playbackText.text="${if(retryAutoplay) "准备恢复播放" else "准备恢复暂停位置"} · ${delay/1000f} 秒后重试 ${recovery.attempts+1}/3 · ${formatTime(retryPosition)}\n$recoveryReason"
         retryPending=true; main.postDelayed(retryRunnable,delay)
     }
+    private fun abandonSeasonContinuation() {
+        val pending=seasonGate.isPending
+        seasonGate.invalidate()
+        if(pending && screen=="player" && player?.playbackState==Player.STATE_ENDED && !playError && episodePanel==null) {
+            requestedAutoplay=false
+            showHud();showPanel();syncMediaSession()
+        }
+    }
+    private fun continueNextSeason(ended: ExoPlayer): Boolean {
+        val source=detail ?: return false
+        fun eligible()=foreground && screen=="player" && player===ended && !isDestroyed &&
+            requestedAutoplay && !pausedForLifecycle && !sleepStopped && library.autoNext &&
+            episodePanel==null && !playError && !seasonSeekToEnd && episodeIndex==source.episodes.lastIndex
+        if(!eligible()) return false
+        if(seasonGate.isPending) return true
+        val token=seasonGate.begin() ?: return false
+        val ticket=generation
+        fun endedControls() {
+            requestedAutoplay=false;ended.pause();playbackText.text="本季已结束";showPanel();syncMediaSession()
+        }
+        playbackText.text="本季已结束 · 正在查找下一季…";showHud()
+        work({ com.hongguotv.core.SeasonContinuation.find(source.series,repository::search,repository::detail) }, { next ->
+            if(generation==ticket && seasonGate.valid(token)) {
+                if(sleepTimer.poll()) { stopForSleep();return@work }
+                val proceed=eligible()
+                seasonGate.consume(token)
+                if(next!=null && proceed) {
+                    saveProgress(completed=true);library.flush();releasePlayer();invalidatePage()
+                    detail=next;pendingDetail=next.series;episodeIndex=0;group=0
+                    library.observeFavorite(next.series.id,next.episodes.size,System.currentTimeMillis(),acknowledge=true)
+                    Toast.makeText(this,"继续播放：${next.series.title}",Toast.LENGTH_LONG).show()
+                    playEpisode(0)
+                } else endedControls()
+            }
+        }, { _ -> if(generation==ticket && seasonGate.consume(token)) endedControls() })
+        return true
+    }
+
     private fun playerFailure(problem: Throwable) {
+        seasonGate.invalidate()
         if(playError) return
         recoveryReason=when {
             generateSequence(problem){it.cause}.any { it is NoCompatibleStreamException } -> "本集未提供兼容的视频编码或清晰度"
@@ -1254,6 +1303,8 @@ class MainActivity: Activity() {
             autoRecovery=true; scheduleRecovery()
         }
         android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else ""))
+        controls.addView(text(com.hongguotv.core.PlaybackDiagnostics.line(problem,android.os.Build.MODEL,
+            android.os.Build.VERSION.RELEASE,android.os.Build.VERSION.SDK_INT,BuildConfig.VERSION_NAME,decoding,recovery.attempts),12f,muted))
     }
     private fun hidePlaybackOverlay() {
         main.removeCallbacks(hideHud)
@@ -1269,6 +1320,7 @@ class MainActivity: Activity() {
         sleepButton?.text="定时 ${sleepTimer.label()}"
         if(screen!="player" || playError) return
         if(sleepStopped) { playbackText.text="定时停止已生效 · 观看位置已保存 · 按播放可继续"; return }
+        if(seasonGate.isPending) { playbackText.text="本季已结束 · 正在查找下一季…"; return }
         if(!playbackReady) { playbackText.text=(if(!requestedAutoplay) "准备后保持暂停 · " else "")+if(video==null) "正在获取播放地址…" else "正在缓冲…"; return }
         val p=player ?: return
         val duration=p.duration.coerceAtLeast(0); val position=pendingSeek ?: p.currentPosition
@@ -1277,6 +1329,7 @@ class MainActivity: Activity() {
         progressBar.progress=if(duration>0) (position*1000/duration).toInt().coerceIn(0,1000) else 0
     }
     private fun requestPlayback(play: Boolean) {
+        abandonSeasonContinuation()
         requestedAutoplay=play; pausedForLifecycle=!play
         if(play) sleepStopped=false
         if(!play) { player?.pause(); retryAutoplay=false; saveProgress() }
@@ -1320,6 +1373,7 @@ class MainActivity: Activity() {
         mediaSession.update(data.series.title,episodeIndex,p?.duration?.coerceAtLeast(0) ?: 0,currentPosition(),library.playbackSpeed,state,episodeIndex>0,episodeIndex<data.episodes.lastIndex)
     }
     private fun stopForSleep() {
+        seasonGate.invalidate()
         sleepStopped=true; requestedAutoplay=false; retryAutoplay=false; pausedForLifecycle=true
         cancelRecovery(); player?.pause(); saveProgress()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1410,6 +1464,7 @@ class MainActivity: Activity() {
         dialog.show()
     }
     private fun showEpisodePanel(anchor: View) {
+        abandonSeasonContinuation()
         val data=detail ?: return
         if(episodePanel!=null) return
         val ticket=generation
@@ -1455,6 +1510,7 @@ class MainActivity: Activity() {
 
     }
     private fun releasePlayer(keepUpcoming: Boolean=false) {
+        seasonGate.invalidate()
         playbackMeasurement?.close(android.os.SystemClock.elapsedRealtime()); playbackMeasurement=null
         bufferingWatchdog.reset()
         if(!keepUpcoming) cancelPrefetch()
@@ -1554,6 +1610,7 @@ class MainActivity: Activity() {
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
+        abandonSeasonContinuation()
         bufferingWatchdog.reset()
         accountScreen?.close(); accountHistorySync.flush()
         updater.pause()

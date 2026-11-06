@@ -3,7 +3,6 @@ package com.hongguotv.nativeapp
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -190,8 +189,7 @@ class AppUpdater(private val activity: Activity,
                     activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}")))
                 } else {
                     val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.updates", apk)
-                    activity.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply { clipData = ClipData.newRawUri("更新安装包", uri) })
+                    PackageInstaller.launch(uri) { activity.startActivity(it) }
                 }
             } catch (_: Exception) { permissionRequested = false; updateStatus("电视未提供安装或授权入口，请通过系统文件管理器安装新版") }
         }

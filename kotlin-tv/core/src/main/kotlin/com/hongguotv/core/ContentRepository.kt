@@ -279,7 +279,10 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
             put("_rticket",clock().toString())
         }
         val url="https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/?"+Signer.encode(values)
-        val raw=fetch(url,mapOf("User-Agent" to VendorConstants.VIDEO_UA,"Accept" to "application/json; charset=utf-8"),null)
+        val headers=PlayerSigner.headers(url.substringAfter('?',""),null).toMutableMap().apply {
+            put("User-Agent",VendorConstants.VIDEO_UA);put("Accept","application/json; charset=utf-8")
+        }
+        val raw=fetch(url,headers,null)
         if(raw.isBlank()) throw EmptyPlaybackException()
         val data=playerJson(raw)
         val code=(if(data.has("code")) data.opt("code") else data.opt("Code"))?.toString()?.toIntOrNull()

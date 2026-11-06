@@ -59,3 +59,14 @@ wanwdbb/hongguoTV bcd229874b875a09b4c7de9b1c3cafe5f85e5f87.
 The disk-backed rolling window, duration/count settings, independent check clocks
 and preparation ownership wrapper are local adaptations. Furthest-progress-wins,
 Media3 upgrades, account rework and the upstream auto-feed UI were not imported.
+
+## Maintenance integration (2026-11-06)
+
+Signed GET fallback follows tsukiyo-zero/hongguoTV PR #74; the local registered
+identity, signer and bounded playback request chain are retained. Conservative
+numbered-season continuation is adapted from wanwdbb/hongguoTV commit
+`faf8876ac24a6040934b64a32ca1dd1ddd52f144` (GPL-3.0-only), with local lifecycle
+tokens, three-page ambiguity checks and detail revalidation. Android 5–7 installer
+fallback in the TV branch follows tsukiyo-zero/hongguoTV PR #69. Safe playback
+diagnostics follow fyworld/hongguoTV commit
+`943869add41c8654609920ddeecdbe1315bf0c95`, using local allowlisted categories.
