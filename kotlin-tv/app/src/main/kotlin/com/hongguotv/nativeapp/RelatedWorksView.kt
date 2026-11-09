@@ -10,7 +10,6 @@ import android.view.View
 import android.widget.*
 import com.hongguotv.core.RelatedWork
 import com.hongguotv.nativeapp.rayneo.RayNeoDialogs
-import com.hongguotv.nativeapp.rayneo.RayNeoDisplay
 
 /** A remote-friendly, independently loaded strip below the episode grid. */
 internal class RelatedWorksView(
@@ -172,9 +171,24 @@ internal class RelatedWorksView(
         }
         panel.addView(label("全部季 / 相关作品 · ${rows.size} 项", 20f))
         val columns = 4
-        val available = (RayNeoDisplay.eyeWidth(context) - dp(56)).coerceAtLeast(dp(148))
-        val cellWidth = minOf(dp(148), available / columns)
-        val grid = GridLayout(context).apply { columnCount = columns }
+        val grid = object : GridLayout(context) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                // Dialogs and eye wrappers can be much narrower than the display.
+                // Size before measuring, including every cell's horizontal margins.
+                val slotWidth = if (View.MeasureSpec.getMode(widthMeasureSpec) == View.MeasureSpec.UNSPECIFIED)
+                    dp(156) else (View.MeasureSpec.getSize(widthMeasureSpec) - paddingLeft - paddingRight) / columns
+                for (index in 0 until childCount) {
+                    val child = getChildAt(index)
+                    val params = child.layoutParams as GridLayout.LayoutParams
+                    val cellWidth = minOf(dp(148), (slotWidth - params.leftMargin - params.rightMargin).coerceAtLeast(0))
+                    if (params.width != cellWidth) {
+                        params.width = cellWidth
+                        child.layoutParams = params
+                    }
+                }
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+            }
+        }.apply { columnCount = columns }
         val cells = rows.map { work ->
             label(work.series.title + "\n" + work.label, 13f).apply {
                 id = View.generateViewId()
@@ -189,7 +203,7 @@ internal class RelatedWorksView(
                 setOnFocusChangeListener { v, focused -> v.background = TvStyle.card(context, focused) }
                 setOnClickListener { allDialog?.dismiss(); open(work, anchor) }
             }.also { cell -> grid.addView(cell, GridLayout.LayoutParams().apply {
-                width = cellWidth; height = dp(76)
+                width = dp(148); height = dp(76)
                 setMargins(dp(4), dp(4), dp(4), dp(4))
             }) }
         }
