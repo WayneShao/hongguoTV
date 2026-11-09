@@ -32,6 +32,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private val devices = PlayerDeviceSource(http, recoverEmpty = true)
     private val searchDevices = PlayerDeviceSource(http, store = { searchDeviceStore },
         register = { SearchDeviceRegistrar(http, clock).register() }, cooldownMillis = 0)
+    /** 每个匿名身份一份线路健康度，进程内有效、最多保留 8 份。 */
+    private val routeHealth = object : LinkedHashMap<String, PlaybackRoutes>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PlaybackRoutes>?) = size > 8
+    }
+    private fun routesFor(device: PlayerDevice): PlaybackRoutes = synchronized(routeHealth) {
+        routeHealth.getOrPut("${device.deviceId}:${device.installId}") { PlaybackRoutes() }
+    }
+    private fun routeNow() = System.nanoTime() / 1_000_000
     private val websiteSearches = linkedMapOf<String, Long>()
     private val site = "https://hongguoduanju.com"
     private data class SearchCursor(val deviceId: String, val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
@@ -50,7 +58,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             val body = response.body ?: throw IOException("内容响应为空")
             if (body.contentLength() > 16*1024*1024) throw IOException("内容响应过大")
             val input=body.byteStream(); val out=java.io.ByteArrayOutputStream(); val buffer=ByteArray(8192)
-            while(out.size()<=16*1024*1024) { val n=input.read(buffer); if(n<0) break; out.write(buffer,0,n) }; val bytes=out.toByteArray()
+            while(out.size()<=16*1024*1024) { RequestScope.ensureActive(); val n=input.read(buffer); if(n<0) break; out.write(buffer,0,n) }; val bytes=out.toByteArray()
             if(bytes.size > 16*1024*1024) throw IOException("内容响应过大")
             String(bytes,Charsets.UTF_8)
         }
@@ -206,16 +214,17 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val rows = mutableListOf<PlayerVariant>()
         var rejected = false
         var sawResponse = false
-        val emptyEndpoints = mutableSetOf<Int>()
+        val emptyRoutes = mutableSetOf<Int>()
         var transportFailure: Exception? = null
         var terminalFailure: Exception? = null
         var incompatibleModel=false
-        val requests = listOf(
-            Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.SHORTPLAY_URL, device), PlayerDeviceSource.shortplayBody(id), mapOf("User-Agent" to "com.dragon.read", "Content-Type" to "application/json; charset=utf-8")),
-            Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.PHOENIX_URL, device), PlayerDeviceSource.phoenixBody(id), mapOf("User-Agent" to VendorConstants.VIDEO_UA, "Accept" to "application/json; charset=utf-8,application/x-protobuf", "Content-Type" to "application/json", "x-xs-from-web" to "0", "sdk-version" to "2")),
+        val requests = mapOf(
+            PlaybackRoutes.SHORTPLAY to Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.SHORTPLAY_URL, device), PlayerDeviceSource.shortplayBody(id), mapOf("User-Agent" to "com.dragon.read", "Content-Type" to "application/json; charset=utf-8")),
+            PlaybackRoutes.PHOENIX to Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.PHOENIX_URL, device), PlayerDeviceSource.phoenixBody(id), mapOf("User-Agent" to VendorConstants.VIDEO_UA, "Accept" to "application/json; charset=utf-8,application/x-protobuf", "Content-Type" to "application/json", "x-xs-from-web" to "0", "sdk-version" to "2")),
         )
-        for ((index, request) in requests.withIndex()) {
-            val (url, body, headers) = request
+        val routes = routesFor(device)
+        for (routeId in routes.plan(routeNow())) {
+            val (url, body, headers) = requests.getValue(routeId)
             try {
                 val signed = PlayerSigner.headers(url.substringAfter('?', ""), body)
                 val data = playerJson(PlaybackReadRetry().read { fetch(url, headers + signed, body) })
@@ -227,11 +236,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 if(!data.has("data")) throw PlaybackModelException("播放响应缺少 data")
                 val payload = data.optJSONObject("data")
                 if (payload == null && !data.isNull("data")) throw PlaybackModelException("播放数据格式异常")
-                if (payload == null || payload.length() == 0) { emptyEndpoints.add(index); continue }
-                val models = StreamModels.models(payload, id, allowDirect = index == 0)
+                if (payload == null || payload.length() == 0) { emptyRoutes.add(routeId); routes.failed(routeId, routeNow(), true); continue }
+                // 直连模型只属于稳定的 0 号线路，不能按当前排序位置判断。
+                val models = StreamModels.models(payload, id, allowDirect = routeId == PlaybackRoutes.SHORTPLAY)
                 if (models.isEmpty()) {
-                    val entry = payload.optJSONObject(id) ?: if (index == 0 && payload.has("video_model")) payload else null
-                    if (entry != null && entry.has("video_model") && (entry.isNull("video_model") || entry.opt("video_model") == "")) { emptyEndpoints.add(index); continue }
+                    val entry = payload.optJSONObject(id) ?: if (routeId == PlaybackRoutes.SHORTPLAY && payload.has("video_model")) payload else null
+                    if (entry != null && entry.has("video_model") && (entry.isNull("video_model") || entry.opt("video_model") == "")) { emptyRoutes.add(routeId); routes.failed(routeId, routeNow(), true); continue }
                     throw PlaybackModelException("播放模型缺失或分集不匹配")
                 }
                 for (model in models) {
@@ -239,18 +249,24 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                     rows += StreamModels.listRows(model.optJSONObject("video_list"), StreamModels.keySeed(model))
                     rows += StreamModels.arrayRows(model.optJSONArray("video_list"))
                     if(rows.size==countBefore && (model.optJSONObject("video_list")?.length() ?: model.optJSONArray("video_list")?.length() ?: 0)>0) incompatibleModel=true
-                    if (rows.any { it.quality == maxQuality }) return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows)
+                    if (rows.any { it.quality == maxQuality }) { routes.success(routeId, routeNow()); return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows) }
                     val fallbackUrl = StreamModels.fallbackApiUrl(model)
-                    if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) emptyEndpoints.add(index)
+                    if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) emptyRoutes.add(routeId)
                     if (fallbackUrl.startsWith("https://")) runCatching {
                         val info = fallbackInfo(fallbackUrl)
                         rows += StreamModels.listRows(info?.optJSONObject("video_list"), info?.str("key_seed")?.takeIf { it.isNotEmpty() }?.let(StreamModels::lenientB64))
                     }.onFailure { if(PlaybackFailure.terminal(it)) throw it; RequestScope.ensureActive(); transportFailure=it as? Exception ?: IOException("备用资源失败",it) }
                 }
-                if (rows.any { it.quality == maxQuality }) return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows)
+                if (rows.any { it.quality == maxQuality }) { routes.success(routeId, routeNow()); return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows) }
+                // 有响应且非空即为线路健康；清晰度不匹配属于模型问题，不降级线路。
+                if (routeId in emptyRoutes) routes.failed(routeId, routeNow(), true) else routes.success(routeId, routeNow())
             } catch (e: DeviceRejectedException) { rejected = true }
-            catch (e: EmptyPlaybackException) { emptyEndpoints.add(index) }
-            catch (e: Exception) { RequestScope.ensureActive(); if(e is PlaybackBudgetExceededException) throw e; if(PlaybackFailure.terminal(e)) terminalFailure=e else transportFailure = e }
+            catch (e: EmptyPlaybackException) { emptyRoutes.add(routeId); routes.failed(routeId, routeNow(), true) }
+            catch (e: Exception) {
+                RequestScope.ensureActive()
+                if(e is PlaybackBudgetExceededException || e is PlaybackDeadlineException) throw e
+                if(PlaybackFailure.terminal(e)) terminalFailure=e else { transportFailure = e; routes.failed(routeId, routeNow(), false) }
+            }
         }
         val chosen = StreamModels.pick(rows, maxQuality)
             ?: run {
@@ -258,7 +274,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 if (incompatibleModel) throw NoCompatibleStreamException()
                 if (rejected) throw DeviceRejectedException("播放设备已被上游拒绝")
                 if (transportFailure != null) throw transportFailure
-                if (emptyEndpoints.size == requests.size) {
+                if (emptyRoutes.size == requests.size || routes.exhausted(routeNow())) {
                     if(PlaybackRequestBudget.current.get()?.claimTabFallback()==true) return tabStream(id,maxQuality,device)
                     throw EmptyPlaybackException()
                 }
@@ -332,7 +348,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             val bodyStream = response.body ?: throw IOException("内容响应为空")
             if (bodyStream.contentLength() > 16 * 1024 * 1024) throw IOException("内容响应过大")
             val input = bodyStream.byteStream(); val out = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
-            while (out.size() <= 16 * 1024 * 1024) { val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
+            while (out.size() <= 16 * 1024 * 1024) { RequestScope.ensureActive(); val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
             if (out.size() > 16 * 1024 * 1024) throw IOException("内容响应过大")
             String(out.toByteArray(), Charsets.UTF_8)
         }

@@ -20,8 +20,7 @@ internal class PlaybackReadRetry(private val sleep: (Long)->Unit = Thread::sleep
                 if(attempt==2 || (!empty && (!temporary || transientRetried))) throw e
                 if(PlaybackRequestBudget.current.get()?.retry()==false) throw e
                 if(!empty) transientRetried=true
-                try { sleep(if(attempt==0) 700 else 1500) }
-                catch(e: InterruptedException) { Thread.currentThread().interrupt(); throw java.io.InterruptedIOException("请求已取消") }
+                RequestScope.sleepWithinDeadline(if(attempt==0) 700 else 1500, sleep)
             }
         }
         error("unreachable")
