@@ -62,4 +62,19 @@ class AppUpdaterTest {
             updater.pause();assertFalse(updater.showing)
         } finally {updater.destroy();controller.pause().stop().destroy()}
     }
+    @Test fun routeSelectionPersistsAndRejectsUnknownValues() {
+        val controller=Robolectric.buildActivity(Activity::class.java).setup();val activity=controller.get()
+        activity.getSharedPreferences("app_updates",0).edit().clear().putString("github_route","https://evil.invalid/").commit()
+        val updater=AppUpdater(activity){false}
+        try {
+            assertEquals(0,updater.routeIndex)
+            assertEquals("自动 · 直连失败后切换镜像",updater.routeLabel)
+            val mirror=AppUpdateRepository.DEFAULT_ACCELERATORS.single()
+            updater.selectRoute(2)
+            assertEquals(mirror,activity.getSharedPreferences("app_updates",0).getString("github_route",""))
+            assertEquals("镜像 · gh-proxy.com",updater.routeLabel)
+            updater.selectRoute(99)
+            assertEquals(mirror,activity.getSharedPreferences("app_updates",0).getString("github_route",""))
+        } finally {updater.destroy();controller.pause().stop().destroy()}
+    }
 }

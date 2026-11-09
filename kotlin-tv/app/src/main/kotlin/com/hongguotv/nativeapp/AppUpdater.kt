@@ -25,11 +25,20 @@ import java.util.concurrent.Future
 
 /** Foreground-only updater: no background service, and no networking or prompts during playback. */
 class AppUpdater(private val activity: Activity,
-    private val repository: AppUpdateRepository = AppUpdateRepository(BuildConfig.APPLICATION_ID, BuildConfig.EMBEDDED_VOICE),
+    provided: AppUpdateRepository? = null,
     private val idle: () -> Boolean) {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private val preferences = activity.getSharedPreferences("app_updates", Activity.MODE_PRIVATE)
+    @Volatile private var selectedRoute = preferences.getString("github_route", "auto").orEmpty().let {
+        if (it == "direct" || it in AppUpdateRepository.DEFAULT_ACCELERATORS) it else "auto"
+    }
+    private val routeValues get() = listOf("auto", "direct") + AppUpdateRepository.DEFAULT_ACCELERATORS
+    val routeLabels get() = listOf("自动 · 直连失败后切换镜像", "直连 GitHub") +
+        AppUpdateRepository.DEFAULT_ACCELERATORS.map { "镜像 · ${Uri.parse(it).host}" }
+    val routeIndex get() = routeValues.indexOf(selectedRoute).coerceAtLeast(0)
+    val routeLabel get() = routeLabels[routeIndex]
+    private val repository = provided ?: AppUpdateRepository(BuildConfig.APPLICATION_ID, BuildConfig.EMBEDDED_VOICE, route = { selectedRoute })
     private val apk = File(activity.cacheDir, "updates/update.apk")
     private var task: Future<*>? = null
     private var generation = 0
@@ -46,6 +55,16 @@ class AppUpdater(private val activity: Activity,
     private var retryAfter = 0L
     private var promptedCode = 0L
     private val auto get() = preferences.getBoolean("automatic", true)
+    fun selectRoute(index: Int) {
+        val next = routeValues.getOrNull(index) ?: return
+        if (next == selectedRoute) return
+        interrupt()
+        selectedRoute = next
+        preferences.edit().putString("github_route", next).apply()
+        retryAfter = 0
+        updateStatus("更新线路已切换为${routeLabel}，将重新检查更新")
+        renderActions()
+    }
     private val poll = object : Runnable {
         override fun run() {
             if (!active) return
