@@ -22,8 +22,8 @@ These GPL-3.0 references inform adaptations to this fork's existing signed reque
 
 ## Verification status
 
-Pending final acceptance. Required gates: core/app tests, Android lint, TV/Keyboard/Full builds, original-signature release verification, muted physical TV upgrade with history retention and playback, related-season and update-route UI, candidate/live release parser checks, and remote asset digests. Record physical observations separately from deterministic test coverage.
+Final code and specification reviews approved. TV: 309 core and 67 app tests; Keyboard and Full: 317 core and 68 app tests each. All passed with zero failures, errors or skips, together with lintDebug and assembleDebug. Coverage includes per-episode bounded preparation failures, separately gated ended fallback, strict season parsing, cancellation and stale update callbacks.
 
-Intermediate TV check of scopes 1–3: 285 core tests and 50 app tests passed with no failures, errors or skips; lintDebug and assembleDebug also passed. This includes legacy certificate access on API21, 23, 25 and 26. Scope 4 and the final combined release still require validation.
+Release acceptance remains pending: original-signature artifacts, muted physical TV upgrade/history/playback, related-season and update-route UI, candidate/live updater fixtures and remote digests. Legacy certificate tests cover API21, 23, 25 and 26. Physical observations are recorded separately from deterministic tests.
 
 Network probes are observations rather than availability guarantees: release metadata and the complete previous TV APK were verified through the mirror; the previous Full APK returned HTTP504 on direct/mirror probes. A successful small download does not establish full-size download availability.

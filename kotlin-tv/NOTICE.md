@@ -76,7 +76,8 @@ diagnostics follow fyworld/hongguoTV commit
 Update routes follow wanwdbb/hongguoTV commit
 `57ea8dabc8fa1c7309ccd4f6876af0f530a9e114`; playback acquisition deadlines and
 identity-specific route health follow tsukiyo-zero/hongguoTV PR #84; modern/legacy
-APK certificate compatibility follows PR #83 (GPL-3.0-only). These are adapted
+APK certificate compatibility follows PR #83; related-work browsing and
+pre-end season hints follow PR #82 (GPL-3.0-only). These are adapted
 to this fork's release-body manifest, signed request paths, bounded recovery and
 platform compatibility. See [maintenance scope](../docs/MAINTENANCE_0.12.6.md)
 for source links and verification requirements.

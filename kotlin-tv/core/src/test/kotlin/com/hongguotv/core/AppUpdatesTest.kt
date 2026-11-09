@@ -221,10 +221,11 @@ class AppUpdatesTest {
         AppUpdateRepository("com.hongguotv.rayneo", true, { "auto" }, { builder ->
             builder.addInterceptor { chain ->
                 val request = chain.request(); paths += request.url.toString()
-                if (request.url.host == "gh-proxy.com")
+                if (request.url.host == "gh-proxy.com") {
+                    assertFalse("尝试镜像前必须清理直连临时文件", File(destination.path + ".part").exists())
                     okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
                         .code(504).message("Gateway Timeout").body(okhttp3.ResponseBody.create(null, ByteArray(0))).build()
-                else okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
+                } else okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
                     .code(200).message("OK").body(okhttp3.ResponseBody.create(null, corrupt)).build()
             }
         }).use { repository ->

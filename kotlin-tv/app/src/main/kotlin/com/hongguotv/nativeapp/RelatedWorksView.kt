@@ -9,8 +9,6 @@ import android.view.Gravity
 import android.view.View
 import android.widget.*
 import com.hongguotv.core.RelatedWork
-import com.hongguotv.nativeapp.rayneo.RayNeoDialogs
-import com.hongguotv.nativeapp.rayneo.RayNeoDisplay
 
 /** A remote-friendly, independently loaded strip below the episode grid. */
 internal class RelatedWorksView(
@@ -26,6 +24,9 @@ internal class RelatedWorksView(
     private val labels = mutableListOf<Pair<RelatedWork, TextView>>()
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
+
+    private fun lastEpisodeRow(): List<View> =
+        upper.takeLastWhile { it.parent === upper.lastOrNull()?.parent }
 
     private fun label(value: String, size: Float = 15f, color: Int = TvStyle.text) =
         TextView(context).apply {
@@ -72,7 +73,7 @@ internal class RelatedWorksView(
                     setPadding(0, dp(8), 0, dp(8))
                 }
             )
-        upper.takeLast(10).forEach { it.nextFocusDownId = refresh.id }
+        lastEpisodeRow().forEach { it.nextFocusDownId = refresh.id }
     }
 
     fun loading() {
@@ -155,7 +156,7 @@ internal class RelatedWorksView(
         refreshButton?.nextFocusDownId = allButton.id
         allButton.nextFocusUpId = refreshButton?.id ?: allButton.id
         allButton.nextFocusDownId = cards.first().id
-        upper.takeLast(10).forEachIndexed { index, view ->
+        lastEpisodeRow().forEachIndexed { index, view ->
             view.nextFocusDownId = cards[minOf(index, cards.lastIndex)].id
         }
     }
@@ -169,7 +170,7 @@ internal class RelatedWorksView(
         }
         panel.addView(label("全部季 / 相关作品 · ${rows.size} 项", 20f))
         val columns = 4
-        val available = (RayNeoDisplay.eyeWidth(context) - dp(56)).coerceAtLeast(dp(148))
+        val available = (resources.displayMetrics.widthPixels - dp(56)).coerceAtLeast(dp(148))
         val cellWidth = minOf(dp(148), available / columns)
         val grid = GridLayout(context).apply { columnCount = columns }
         val cells = rows.map { work ->
@@ -196,14 +197,14 @@ internal class RelatedWorksView(
             cell.nextFocusUpId = cells.getOrNull(i - columns)?.id ?: cell.id
             cell.nextFocusDownId = cells.getOrNull(i + columns)?.id ?: cell.id
         }
-        // RayNeoDialogs wraps the content view, so the grid needs an explicit height to scroll.
+        // Give the grid a bounded viewport so remote focus can scroll the complete list.
         val rowsCount = (cells.size + columns - 1) / columns
         val gridHeight = minOf(dp(420), (rowsCount * (dp(76) + dp(8))).coerceAtLeast(dp(76)))
         panel.addView(ScrollView(context).apply {
             isVerticalScrollBarEnabled = false
             addView(grid)
         }, LayoutParams(-1, gridHeight))
-        val dialog = RayNeoDialogs.builder(context).setView(panel).create()
+        val dialog = AlertDialog.Builder(context).setView(panel).create()
         allDialog = dialog
         dialog.setOnDismissListener {
             if (allDialog === dialog) allDialog = null

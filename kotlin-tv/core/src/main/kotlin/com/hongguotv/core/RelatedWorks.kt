@@ -2,9 +2,16 @@
 package com.hongguotv.core
 
 import java.io.IOException
+import java.text.Normalizer
 import org.json.JSONObject
 
-data class RelatedWork(val series: Series, val season: String, val upcoming: Boolean, val seasonIndex: Int = 0) {
+data class RelatedWork(
+    val series: Series,
+    val season: String,
+    val upcoming: Boolean,
+    val seasonIndex: Int = 0,
+    val contentType: Int = 0,
+) {
     val label
         get() =
             listOf(season, if (upcoming) "待上线 · 预约" else "已上线")
@@ -36,7 +43,8 @@ object RelatedWorks {
     private fun stem(title: String) = title.trim().replace(seasonSuffix, "")
         .replace(Regex("[\\p{P}\\p{Z}\\s]"), "")
 
-    private fun titleKey(title: String) = title.trim().replace(Regex("[\\p{P}\\p{Z}\\s]"), "")
+    private fun titleKey(title: String) = Normalizer.normalize(title, Normalizer.Form.NFKC)
+        .replace(Regex("[\\p{P}\\p{Z}\\s]"), "")
 
     fun ordered(current: Series, rows: List<RelatedWork>): List<RelatedWork> = rows.sortedWith(
         compareBy<RelatedWork> { if (stem(it.series.title) == stem(current.title)) 0 else 1 }
@@ -46,45 +54,53 @@ object RelatedWorks {
                 ?: 1 }
     )
 
-    /** Conservative: identical title stem, consecutive season, unique playable candidate. */
+    /**
+     * Conservative: both titles must carry explicit adjacent season numbers, the title stems must
+     * match, optional season metadata must agree, and exactly one playable candidate may remain.
+     * Browsing may infer an unnumbered season; autoplay never does.
+     */
     fun nextSeason(current: Series, rows: List<RelatedWork>): RelatedWork? {
-        val title = current.title.trim()
-        val suffix = seasonSuffix.find(title)
-        val number = suffix?.groupValues?.get(1)?.let(::seasonNumber) ?: if (suffix == null) 1 else return null
-        val currentStem = stem(title)
-        if (currentStem.isBlank()) return null
+        val source = SeasonContinuation.name(current.title) ?: return null
         return rows.filter { row ->
-            val candidateTitle = row.series.title.trim()
-            val candidateSuffix = seasonSuffix.find(candidateTitle)
-            val fromTitle = candidateSuffix?.groupValues?.get(1)?.let(::seasonNumber)
-            val index = row.seasonIndex.takeIf { it > 0 } ?: fromTitle
-            !row.upcoming && row.series.id != current.id && index == number + 1 &&
-                (fromTitle == null || fromTitle == index) &&
-                stem(candidateTitle) == currentStem
+            val candidate = SeasonContinuation.name(row.series.title) ?: return@filter false
+            !row.upcoming && row.series.id != current.id && candidate.season == source.season + 1 &&
+                (row.seasonIndex <= 0 || row.seasonIndex == candidate.season) &&
+                candidate.base == source.base
         }.singleOrNull()
     }
 
     /**
      * Related rows carry a verified playable content type even when the website detail/search
-     * response omits book_type. Re-check the candidate's detail before continuing: same id and
-     * title, real non-empty episodes. Ambiguous same-name seasons are still rejected upstream.
+     * response omits book_type. Only `content_type=1004` is authoritative provenance: unknowns
+     * (`bookType=0`) may continue solely on that proof plus detail re-verification, known
+     * incompatible types are rejected, and previews never autoplay. Ambiguous same-name seasons
+     * are still rejected upstream.
      */
     fun verifiedNextSeason(
         current: Series,
         related: (String) -> List<RelatedWork>,
         detail: (String) -> Detail,
     ): Detail? {
+        if (current.preview || !playableBookType(current.bookType)) return null
         val candidate = nextSeason(current, related(current.id)) ?: return null
+        if (candidate.upcoming || candidate.series.preview || candidate.contentType != 1004 ||
+            !playableBookType(candidate.series.bookType)) return null
         RequestScope.ensureActive()
         val verified = detail(candidate.series.id)
         return verified.takeIf {
             it.series.id == candidate.series.id &&
                 !it.series.preview &&
+                playableBookType(it.series.bookType) &&
+                listOf(current.bookType, candidate.series.bookType, it.series.bookType)
+                    .filter { type -> type != 0 }.distinct().size <= 1 &&
                 titleKey(it.series.title) == titleKey(candidate.series.title) &&
                 it.episodes.isNotEmpty() &&
                 it.episodes.all(String::isNotBlank)
         }
     }
+
+    /** Zero means the website omitted the type; only short-drama book types are playable. */
+    private fun playableBookType(type: Int) = type == 0 || type in 2..5
 
     fun parse(raw: String, currentId: String): List<RelatedWork> {
         val root = JSONObject(raw)
@@ -123,6 +139,7 @@ object RelatedWorks {
                     season,
                     upcoming,
                     row.optInt("season_index").coerceAtLeast(0),
+                    type,
                 )
             }
             .distinctBy { it.series.id }

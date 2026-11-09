@@ -5,7 +5,7 @@ import java.text.Normalizer
 
 /** Conservative adjacent numbered seasons. Search failures propagate; callers retain ended controls. */
 object SeasonContinuation {
-    private data class Name(val base: String,val season: Int)
+    internal data class Name(val base: String,val season: Int)
     private val suffix=Regex("^(.*?)第([0-9零〇一二两三四五六七八九十百]+)季$")
     private fun number(value: String): Int? {
         value.toIntOrNull()?.let { return it.takeIf { n -> n in 1..999 } }
@@ -23,7 +23,7 @@ object SeasonContinuation {
         }
         return (sum+digit).takeIf { it in 1..999 }
     }
-    private fun name(title: String): Name? {
+    internal fun name(title: String): Name? {
         val normalized=Normalizer.normalize(title,Normalizer.Form.NFKC).replace(Regex("[\\p{P}\\p{Z}\\s]"),"")
         val match=suffix.matchEntire(normalized) ?: return null
         val base=match.groupValues[1].takeIf { it.isNotBlank() } ?: return null
