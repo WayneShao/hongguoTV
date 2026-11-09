@@ -54,6 +54,8 @@ class AppUpdater(private val activity: Activity,
     private var statusView: TextView? = null
     private var anchor: View? = null
     private var status = "当前版本 ${BuildConfig.VERSION_NAME}"
+    /** 供界面与回归测试读取的当前状态文本。 */
+    internal val statusText get() = status
     private var retryAfter = 0L
     private var promptedCode = 0L
     private val auto get() = preferences.getBoolean("automatic", true)
@@ -62,7 +64,8 @@ class AppUpdater(private val activity: Activity,
         if (next == selectedRoute) return
         interrupt()
         selectedRoute = next
-        preferences.edit().putString("github_route", next).apply()
+        // 清除上次检查时间，切换后下一轮轮询立即重新检查，而不是继续等满 6 小时。
+        preferences.edit().putString("github_route", next).putLong("last_attempt", 0).apply()
         retryAfter = 0
         updateStatus("更新线路已切换为${routeLabel}，将重新检查更新")
         renderActions()
@@ -148,6 +151,8 @@ class AppUpdater(private val activity: Activity,
         next.getButton(AlertDialog.BUTTON_POSITIVE).post { if (dialog === next) next.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus() }
     }
     private fun <T> work(action: () -> T, done: (T) -> Unit) {
+        // 新任务开始前清除上一次暂停/切线的取消标记，避免误伤本次请求。
+        repository.resetCancellation()
         busy = true; renderActions(); val ticket = ++generation
         task = worker.submit {
             try {
@@ -198,7 +203,7 @@ class AppUpdater(private val activity: Activity,
         val version = if (Build.VERSION.SDK_INT >= 28) candidate.longVersionCode else candidate.versionCode.toLong()
         if (candidate.packageName != activity.packageName || version != update.versionCode || candidate.versionName != update.versionName || version <= BuildConfig.VERSION_CODE ||
             candidate.applicationInfo?.minSdkVersion != update.minSdk ||
-            UpdateApkSignatures.signers(installed).isEmpty() || UpdateApkSignatures.signers(installed) != UpdateApkSignatures.signers(candidate))
+            !UpdateApkSignatures.matches(UpdateApkSignatures.signers(installed), UpdateApkSignatures.signers(candidate)))
             throw IOException("新版包名、版本或签名不匹配，已阻止安装")
     }
     private fun install() {

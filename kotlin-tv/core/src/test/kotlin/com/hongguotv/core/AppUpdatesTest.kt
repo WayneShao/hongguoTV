@@ -171,6 +171,48 @@ class AppUpdatesTest {
         assertFalse(AppUpdateRepository.permittedHosts().contains("untrusted.invalid"))
     }
 
+    @Test fun acceleratorPrefixMustBeRootHttpsHost() {
+        assertEquals("gh-proxy.com", AppUpdateRepository.hostOf("https://gh-proxy.com"))
+        assertEquals("gh-proxy.com", AppUpdateRepository.hostOf("https://gh-proxy.com/"))
+        // 只允许根路径前缀；带子路径、查询、用户信息或明文的主机一律拒绝。
+        assertNull(AppUpdateRepository.hostOf("https://gh-proxy.com/sub/"))
+        assertNull(AppUpdateRepository.hostOf("https://gh-proxy.com/?x=1"))
+        assertNull(AppUpdateRepository.hostOf("https://user@gh-proxy.com/"))
+        assertNull(AppUpdateRepository.hostOf("http://gh-proxy.com/"))
+        assertNull(AppUpdateRepository.hostOf("https://gh-proxy.com:8443/"))
+    }
+
+    @Test fun mirrorGatewayErrorReportsStatusAndDoesNotAssumeSuccess() {
+        val paths = mutableListOf<String>()
+        AppUpdateRepository("com.hongguotv.rayneo", true, { "auto" }, { builder ->
+            builder.addInterceptor { chain ->
+                paths += chain.request().url.toString()
+                okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(504).message("Gateway Timeout").body(okhttp3.ResponseBody.create(null, ByteArray(0))).build()
+            }
+        }).use { repository ->
+            val failure = assertThrows(IOException::class.java) { repository.latest() }
+            assertTrue("必须保留网关状态码，实际：${failure.message}", failure.message.orEmpty().contains("504"))
+        }
+        // 直连失败后只尝试一次已验证镜像，两次都返回 504 也不能伪装成功。
+        assertEquals(2, paths.size)
+    }
+
+    @Test fun failedMirrorDownloadCleansPartialAndReportsStatus() = withFile { destination ->
+        AppUpdateRepository("com.hongguotv.rayneo", true, { "auto" }, { builder ->
+            builder.addInterceptor { chain ->
+                okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(504).message("Gateway Timeout").body(okhttp3.ResponseBody.create(null, ByteArray(0))).build()
+            }
+        }).use { repository ->
+            val failure = assertThrows(IOException::class.java) { repository.download(update(), destination) {} }
+            assertTrue("必须保留网关状态码，实际：${failure.message}", failure.message.orEmpty().contains("504"))
+        }
+        // 失败后不得留下可被误认为已完成安装包的文件或临时文件。
+        assertFalse(destination.exists())
+        assertFalse(File(destination.path + ".part").exists())
+    }
+
     @Test fun automaticRouteFallsBackToMirrorAfterDirectNetworkFailure() = withFile { destination ->
         val release = releaseJson()
         release.getJSONArray("assets").getJSONObject(2).put("size", bytes.size)
