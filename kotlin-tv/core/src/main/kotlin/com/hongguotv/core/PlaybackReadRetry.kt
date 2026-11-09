@@ -2,7 +2,8 @@ package com.hongguotv.core
 
 import java.io.IOException
 
-internal class EmptyPlaybackException: IOException("播放接口未返回有效数据，请稍后再试")
+/** completeRound 为 false 时只是冷却跳过的半轮探测，不得计入完整空轮次。 */
+internal class EmptyPlaybackException(val completeRound: Boolean = true): IOException("播放接口未返回有效数据，请稍后再试")
 internal class PlaybackHttpException(val status: Int): IOException("播放请求失败（HTTP $status）")
 /** Per read budget: at most three total attempts; identity rotation is a separate transaction. */
 internal class PlaybackReadRetry(private val sleep: (Long)->Unit = Thread::sleep) {
