@@ -4,7 +4,6 @@ package com.hongguotv.nativeapp
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -165,18 +164,16 @@ class AppUpdater(private val activity: Activity,
             if (idle() && dialog == null && (manual || !deferred(update))) { promptedCode = update.versionCode; show(activity.currentFocus) }
         }
     }
-    @Suppress("DEPRECATION")
     private fun validateApk(update: AppUpdate) {
         if (!UpdateFiles.verify(apk, update)) throw IOException("安装包校验未通过，请重新下载")
         val pm = activity.packageManager
-        val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        val flags = UpdateApkSignatures.flags()
         val candidate = pm.getPackageArchiveInfo(apk.path, flags) ?: throw IOException("安装包无法识别")
         val installed = pm.getPackageInfo(activity.packageName, flags)
         val version = if (Build.VERSION.SDK_INT >= 28) candidate.longVersionCode else candidate.versionCode.toLong()
-        fun signers(info: android.content.pm.PackageInfo) =
-            (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures)?.map { it.toCharsString() }?.toSet().orEmpty()
         if (candidate.packageName != activity.packageName || version != update.versionCode || candidate.versionName != update.versionName || version <= BuildConfig.VERSION_CODE ||
-            (Build.VERSION.SDK_INT >= 24 && minSdk(candidate) != update.minSdk) || signers(installed).isEmpty() || signers(installed) != signers(candidate))
+            (Build.VERSION.SDK_INT >= 24 && minSdk(candidate) != update.minSdk) ||
+            UpdateApkSignatures.signers(installed).isEmpty() || UpdateApkSignatures.signers(installed) != UpdateApkSignatures.signers(candidate))
             throw IOException("新版包名、版本或签名不匹配，已阻止安装")
     }
     private fun install() {
