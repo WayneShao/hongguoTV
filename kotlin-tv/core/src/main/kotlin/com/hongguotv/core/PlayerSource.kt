@@ -22,6 +22,9 @@ internal class PlayerDeviceSource(
     private val recoverEmpty: Boolean = false,
     private val cooldownMillis: Long = 300_000,
     private val monotonicMillis: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val awaitLock: (java.util.concurrent.locks.ReentrantLock, Long) -> Boolean = { lock, wait ->
+        lock.tryLock(wait, java.util.concurrent.TimeUnit.MILLISECONDS)
+    },
 ) {
     private fun activeDevice(): PlayerDevice {
         val saved=store()?.load()?.let(PlayerDevice::fromJson)
@@ -61,7 +64,7 @@ internal class PlayerDeviceSource(
                     val remaining = RequestScope.remainingMillis()
                     if (remaining != null && remaining <= 0) throw PlaybackDeadlineException()
                     val wait = if (remaining == null) LOCK_WAIT_MILLIS else minOf(LOCK_WAIT_MILLIS, remaining)
-                    if (state.lock.tryLock(wait, java.util.concurrent.TimeUnit.MILLISECONDS)) break
+                    if (awaitLock(state.lock, wait)) break
                 }
             } catch (interrupted: InterruptedException) {
                 Thread.currentThread().interrupt()

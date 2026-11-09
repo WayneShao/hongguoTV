@@ -100,6 +100,8 @@ internal class DeviceRegistrar(
     }
 
     private fun rethrowTerminal(error: Exception) {
+        // 取消可能只表现为普通 IOException（线程未中断），先复查作用域再分类，避免被 best-effort 吞掉。
+        RequestScope.ensureActive()
         if (PlaybackFailure.terminal(error) || Thread.currentThread().isInterrupted)
             throw error
     }
@@ -193,6 +195,8 @@ internal class DeviceRegistrar(
                 lastError = e
                 // 截止时间或取消是终止条件，重试等待不得吞掉。
                 rethrowTerminal(e)
+                // 重试等待前再次复查，缩小分类与休眠之间被取消的竞态窗口。
+                RequestScope.ensureActive()
                 // 注册重试同样受本次获取的总时限约束，超时后立即终止。
                 RequestScope.sleepWithinDeadline(1000, sleep)
             }
