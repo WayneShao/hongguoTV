@@ -21,11 +21,13 @@ class UpdateApkSignaturesTest {
         assertNotEquals(0, flags and PackageManager.GET_SIGNING_CERTIFICATES)
     }
 
-    @Test @Config(sdk = [26])
+    @Test @Config(sdk = [21, 23, 25, 26])
     fun olderFrameworkOnlyRequestsLegacyCertificates() {
         val flags = UpdateApkSignatures.flags()
         assertNotEquals(0, flags and PackageManager.GET_SIGNATURES)
         assertEquals(0, flags and PackageManager.GET_SIGNING_CERTIFICATES)
+        val info = PackageInfo().apply { signatures = arrayOf(Signature(byteArrayOf(1, 2, 3))) }
+        assertEquals(setOf(info.signatures!!.single().toCharsString()), UpdateApkSignatures.signers(info))
     }
 
     @Test fun emptyModernFieldFallsBackToLegacySignature() {
