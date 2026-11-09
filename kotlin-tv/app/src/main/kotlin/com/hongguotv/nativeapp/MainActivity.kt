@@ -1431,7 +1431,7 @@ class MainActivity: Activity() {
                     if(!seasonContinuationAllowed(current)) { seasonPending=false; nextSeasonDetail=null; return@post }
                     nextSeasonDetail=next
                     if(next!=null) {
-                        val banner=text("本季结束后播放《${next.series.title}》 · 取消请按 → 操作菜单",13f).apply {
+                        val banner=text("本季结束后播放《${next.series.title}》 · 取消请按 ↑ 或菜单键",13f).apply {
                             setPadding(dp(14),dp(9),dp(14),dp(9))
                             setSingleLine(true)
                             ellipsize=TextUtils.TruncateAt.END
