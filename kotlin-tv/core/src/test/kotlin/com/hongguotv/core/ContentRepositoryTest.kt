@@ -293,4 +293,17 @@ class ContentRepositoryTest {
         assertEquals("456",repo.search("短剧",1).items.single().id)
         assertEquals(2,paths.size)
     }
+
+    @Test fun relatedRealSampleResolvesVerifiedNextSeasonWhenBookTypeIsUnknown() {
+        val body=javaClass.getResource("/related-resume-sample.json")!!.readText()
+        val repo=repository { body }
+        val current=Series("7693090206953507864","末世选择，从解析神明开始成神第二季",bookType=0)
+        val rows=repo.related(current.id)
+        assertEquals(11,rows.size)
+        val next=RelatedWorks.verifiedNextSeason(current,{ repo.related(it) },{ id ->
+            Detail(Series(id,"末世选择，从解析神明开始成神第三季",bookType=0),(1..116).map { "episode-$it" })
+        })
+        assertEquals("7702023183850818585",next?.series?.id)
+        assertEquals(116,next?.episodes?.size)
+    }
 }

@@ -59,6 +59,7 @@ class MainActivity: Activity() {
     }
     private fun accountChanged() {
         cloudHistory.clear(); cloudOwner=accountRepository.currentSession()?.user?.id.orEmpty()
+        relatedReserveTicket++; relatedReservations.clear(); relatedSection?.refreshLabels()
         if(library.isLoaded) accountHistorySync.resume(library.history())
     }
     private fun showAccount(section: String?=null,focusSeries: String?=null) {
@@ -106,6 +107,16 @@ class MainActivity: Activity() {
     private var restoreStoppedPage=false
     private var pendingDetail: Series?=null
     private var detailAutoplay=true
+    private var seasonGeneration=0
+    private var seasonBanner: TextView?=null
+    private var nextSeasonDetail: Detail?=null
+    private var seasonSuppressed=false
+    private var seasonPending=false
+    private var seasonLookup: RequestScope?=null
+    private var relatedSection: RelatedWorksView?=null
+    private var relatedLoadTicket=0
+    private val relatedReservations=mutableMapOf<String,AccountReservation>()
+    private var relatedReserveTicket=0
     private var libraryLoadError: Throwable?=null
     private var workScope: RequestScope?=null
     private var workJob: java.util.concurrent.Future<*>?=null
@@ -237,6 +248,8 @@ class MainActivity: Activity() {
                 if(hud.visibility==View.VISIBLE) updatePlaybackText()
                 maybePrefetch()
                 maybeQueueNext()
+                maybePrepareSeason()
+                updateSeasonBanner()
                 val now=android.os.SystemClock.elapsedRealtime()
                 if(player?.isPlaying==true && now-lastSaved>5000) { saveProgress(); lastSaved=now }
             }
@@ -320,7 +333,9 @@ class MainActivity: Activity() {
         (io as? java.util.concurrent.ThreadPoolExecutor)?.purge()
     }
     private fun invalidatePage() {
+        cancelNextSeason()
         seasonGate.invalidate()
+        relatedSection=null
         accountScreen?.destroy(); accountScreen=null
         generation++; cancelWork(); artwork.cancelPage()
     }
@@ -770,6 +785,12 @@ class MainActivity: Activity() {
             library.autoNext=!library.autoNext
             autoNextButton.text="自动连播  ·  ${if(library.autoNext) "开启" else "关闭"}"
         }
+        lateinit var seasonButton: TextView
+        seasonButton=setting(playback,"跨季自动连播  ·  ${if(library.seasonAutoplay) "开启" else "关闭"}") {
+            library.seasonAutoplay=!library.seasonAutoplay
+            seasonButton.text="跨季自动连播  ·  ${if(library.seasonAutoplay) "开启" else "关闭"}"
+            if(library.seasonAutoplay && !library.autoNext) notices.show("还需开启自动连播才会生效",1)
+        }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -797,7 +818,7 @@ class MainActivity: Activity() {
         val license=setting(device,"开源许可") {
             AlertDialog.Builder(this).setTitle("开源许可").setMessage("本应用以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：N3urda/hongguoTV-updates。").setPositiveButton("关闭",null).show()
         }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton); val right=listOf(backup,hidden,updates,route,license)
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,seasonButton); val right=listOf(backup,hidden,updates,route,license)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
             view.nextFocusUpId=items.getOrNull(index-1)?.id ?: accountEntry.id
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
@@ -968,9 +989,62 @@ class MainActivity: Activity() {
             content.addView(line,lp(-1,dp(49)))
         }
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
+        lateinit var related: RelatedWorksView
+        related=RelatedWorksView(this,episodes,::loadCover,::relatedReservationLabel,::openRelated) { loadRelated(data,related) }
+        content.addView(related,lp(-1,-2))
+        relatedSection=related
+        loadRelated(data,related)
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
+    private fun loadRelated(data: Detail,section: RelatedWorksView) {
+        section.loading()
+        val ticket=++relatedLoadTicket
+        work({ repository.related(data.series.id) }, { rows ->
+            if(ticket==relatedLoadTicket && detail?.series?.id==data.series.id && relatedSection===section)
+                section.show(RelatedWorks.ordered(data.series,rows))
+        }, { if(ticket==relatedLoadTicket && detail?.series?.id==data.series.id && relatedSection===section) section.failed() })
+        if(accountRepository.currentSession()!=null) loadReservations() else relatedReservations.clear()
+    }
+    private fun loadReservations() {
+        val ticket=++relatedReserveTicket
+        val session=accountRepository.currentSession() ?: run { relatedReservations.clear(); return }
+        io.submit {
+            val rows=runCatching { accountRepository.accountReservations().reservations }.getOrDefault(emptyList())
+            main.post {
+                if(isDestroyed || ticket!=relatedReserveTicket) return@post
+                if(accountRepository.currentSession()?.user?.id!=session.user.id) return@post
+                relatedReservations.clear(); rows.forEach { relatedReservations[it.series.id]=it }
+                relatedSection?.refreshLabels()
+            }
+        }
+    }
+    private fun relatedReservationLabel(work: RelatedWork)=
+        if(relatedReservations[work.series.id]?.subscribed==true) "已预约 · 取消预约" else "待上线 · 预约"
+    private fun openRelated(work: RelatedWork,anchor: View) {
+        if(!work.upcoming) { openDetail(work.series); return }
+        val session=accountRepository.currentSession() ?: run {
+            tvTools.info("预约需要登录","请先在设置中登录红果账号后再预约。",anchor); return
+        }
+        val current=relatedReservations[work.series.id]
+        val active=current?.subscribed!=true
+        val itemType=current?.itemType ?: 14
+        anchor.isEnabled=false
+        io.submit {
+            val ok=runCatching { accountRepository.setReservation(work.series.id,active,itemType) }.getOrDefault(false)
+            main.post {
+                if(isDestroyed) return@post
+                if(anchor.isAttachedToWindow) anchor.isEnabled=true
+                if(!ok) { notices.show("预约操作失败，请稍后重试",1); return@post }
+                if(accountRepository.currentSession()?.user?.id!=session.user.id) return@post
+                if(current==null) relatedReservations[work.series.id]=AccountReservation(work.series,itemType=itemType,subscribed=active)
+                else relatedReservations[work.series.id]=current.copy(subscribed=active)
+                relatedSection?.refreshLabels()
+                notices.show(if(active) "已预约：${work.series.title}" else "已取消预约：${work.series.title}",1)
+            }
+        }
+    }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
+        cancelNextSeason(); seasonSuppressed=false
         seasonGate.reset();seasonSeekToEnd=false
         updater.interrupt()
         val data=detail ?: return
@@ -1090,7 +1164,11 @@ class MainActivity: Activity() {
                         val stop=completeEpisode(episodeIndex,p.currentPosition,currentEpisodeDuration)
                         if(stop) stopForSleep()
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && !sleepStopped && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
-                        else if(!continueNextSeason(p)) { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
+                        else {
+                            val prepared=foreground && requestedAutoplay && !pausedForLifecycle && !sleepStopped && library.autoNext &&
+                                episodeIndex==data.episodes.lastIndex && library.seasonAutoplay && finishSeason(data)
+                            if(!prepared && !continueNextSeason(p)) { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
+                        }
                     }
                 }
                 override fun onRenderedFirstFrame() {
@@ -1133,6 +1211,7 @@ class MainActivity: Activity() {
                     }
                 }
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean,reason: Int) {
+                    if(active() && !playWhenReady && reason!=Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) cancelNextSeason()
                     if(active() && !playWhenReady) abandonSeasonContinuation()
                     if(active()) { if(!playWhenReady) measurement.interrupted(android.os.SystemClock.elapsedRealtime()); measure() }
                     if(!active() || playWhenReady || reason!=Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) return
@@ -1277,7 +1356,7 @@ class MainActivity: Activity() {
             requestedAutoplay=false;ended.pause();playbackText.text="本季已结束";showPanel();syncMediaSession()
         }
         playbackText.text="本季已结束 · 正在查找下一季…";showHud()
-        work({ com.hongguotv.core.SeasonContinuation.find(source.series,repository::search,repository::detail) }, { next ->
+        work({ RelatedWorks.verifiedNextSeason(source.series,repository::related,repository::detail) }, { next ->
             if(generation==ticket && seasonGate.valid(token)) {
                 if(sleepTimer.poll()) { stopForSleep();return@work }
                 val proceed=eligible()
@@ -1291,6 +1370,78 @@ class MainActivity: Activity() {
                 } else endedControls()
             }
         }, { _ -> if(generation==ticket && seasonGate.consume(token)) endedControls() })
+        return true
+    }
+
+    private fun cancelNextSeason() {
+        seasonGeneration++
+        seasonPending=false
+        nextSeasonDetail=null
+        seasonBanner?.let { (it.parent as? ViewGroup)?.removeView(it) }
+        seasonBanner=null
+        seasonLookup?.cancel(); seasonLookup=null
+    }
+
+    private fun maybePrepareSeason() {
+        val current=detail ?: return
+        val p=player ?: return
+        if(screen!="player" || !foreground || episodePanel!=null) return
+        if(!library.seasonAutoplay || !library.autoNext || seasonSuppressed || seasonPending || playError) return
+        if(sleepStopped || pausedForLifecycle || !requestedAutoplay) return
+        if(episodeIndex==current.episodes.lastIndex && p.duration>0 && p.currentPosition>=p.duration/2 && p.isPlaying)
+            offerNextSeason(current)
+    }
+
+    private fun updateSeasonBanner() {
+        seasonBanner?.visibility=if(screen=="player" && !panel && episodePanel==null && !tvTools.showing && !playError && !sleepStopped) View.VISIBLE else View.GONE
+    }
+
+    private fun offerNextSeason(current: Detail) {
+        if(!library.seasonAutoplay || !library.autoNext || seasonSuppressed || seasonPending || !foreground) return
+        seasonPending=true
+        val token=++seasonGeneration
+        val scope=RequestScope().also { seasonLookup=it }
+        io.submit {
+            try {
+                val next=scope.run { RelatedWorks.verifiedNextSeason(current.series,repository::related,repository::detail) }
+                main.post {
+                    if(token!=seasonGeneration || isDestroyed || !foreground || detail?.series?.id!=current.series.id) return@post
+                    nextSeasonDetail=next
+                    if(next!=null) {
+                        val banner=text("本季结束后播放《${next.series.title}》 · 取消请按 → 操作菜单",13f).apply {
+                            setPadding(dp(14),dp(9),dp(14),dp(9))
+                            setSingleLine(true)
+                            ellipsize=TextUtils.TruncateAt.END
+                            background=TvStyle.shape(this@MainActivity,Color.argb(175,12,18,28))
+                        }
+                        seasonBanner=banner
+                        root.addView(banner,FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM).apply {
+                            setMargins(dp(24),0,dp(24),dp(20))
+                        })
+                        updateSeasonBanner()
+                    }
+                }
+            } catch(e: Exception) {
+                main.post {
+                    if(token!=seasonGeneration) return@post
+                    seasonPending=false; nextSeasonDetail=null
+                }
+            }
+        }
+    }
+
+    /** 已准备并校验下一季时无缝接续；返回 false 表示没有可用准备，让结束流程回退到自动查找。 */
+    private fun finishSeason(current: Detail): Boolean {
+        val next=nextSeasonDetail ?: return false
+        if(next.series.id==current.series.id || next.episodes.isEmpty() ||
+            !foreground || seasonSuppressed || !library.seasonAutoplay || !library.autoNext ||
+            sleepStopped || pausedForLifecycle || detail?.series?.id!=current.series.id) return false
+        seasonBanner?.visibility=View.GONE
+        saveProgress(completed=true); library.flush(); releasePlayer(); invalidatePage()
+        detail=next; pendingDetail=next.series; episodeIndex=0; group=0
+        library.observeFavorite(next.series.id,next.episodes.size,System.currentTimeMillis(),acknowledge=true)
+        notices.show("继续播放：${next.series.title}",1)
+        playEpisode(0)
         return true
     }
 
@@ -1395,6 +1546,7 @@ class MainActivity: Activity() {
         mediaSession.update(data.series.title,episodeIndex,p?.duration?.coerceAtLeast(0) ?: 0,currentPosition(),library.playbackSpeed,state,episodeIndex>0,episodeIndex<data.episodes.lastIndex)
     }
     private fun stopForSleep() {
+        cancelNextSeason()
         seasonGate.invalidate()
         sleepStopped=true; requestedAutoplay=false; retryAutoplay=false; pausedForLifecycle=true
         cancelRecovery(); player?.pause(); saveProgress()
@@ -1429,8 +1581,12 @@ class MainActivity: Activity() {
         main.removeCallbacks(seekRunnable); main.postDelayed(seekRunnable,250); updatePlaybackText(); showHud()
     }
     private fun showPanel() {
+        seasonBanner?.visibility=View.GONE
         if(playError) return
         panel=true; showHud(); controls.visibility=View.VISIBLE; controls.removeAllViews()
+        if(nextSeasonDetail!=null) addButton(controls,"取消本次跨季连播") {
+            seasonSuppressed=true; cancelNextSeason(); showPanel()
+        }
         val transport=row(); controls.addView(transport)
         val play=addButton(transport,if(player?.playWhenReady==true) "暂停" else "播放") { togglePlayback() }.also { transportPlay=it }
         addButton(transport,"上一集") { if(episodeIndex>0) playEpisode(episodeIndex-1) }.apply { isEnabled=episodeIndex>0; isFocusable=episodeIndex>0; alpha=if(episodeIndex>0) 1f else .4f }
@@ -1532,6 +1688,7 @@ class MainActivity: Activity() {
 
     }
     private fun releasePlayer(keepUpcoming: Boolean=false) {
+        cancelNextSeason()
         seasonGate.invalidate()
         playbackMeasurement?.close(android.os.SystemClock.elapsedRealtime()); playbackMeasurement=null
         bufferingWatchdog.reset()
@@ -1632,6 +1789,7 @@ class MainActivity: Activity() {
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
+        cancelNextSeason()
         abandonSeasonContinuation()
         bufferingWatchdog.reset()
         accountScreen?.close(); accountHistorySync.flush()

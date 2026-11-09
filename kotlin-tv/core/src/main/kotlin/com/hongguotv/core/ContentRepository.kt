@@ -187,6 +187,75 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
         }
         return CatalogPage(valid(list),tab.optBoolean("has_more",false) && page<100)
     }
+    private val relatedCache = linkedMapOf<String, List<RelatedWork>>()
+
+    fun related(id: String, force: Boolean = false): List<RelatedWork> {
+        require(id.matches(Regex("[0-9]{1,30}")))
+        if (!force)
+            synchronized(relatedCache) {
+                relatedCache[id]?.let {
+                    return it
+                }
+            }
+        var failure: Exception? = null
+        val values =
+            VendorConstants.device.toMutableMap().apply {
+                for (key in
+                    listOf(
+                        "version_code",
+                        "manifest_version_code",
+                        "update_version_code",
+                        "pv_player",
+                    )) put(key, "72232")
+                put("version_name", "7.2.2.32")
+                putAll(
+                    mapOf(
+                        "scene" to "10",
+                        "from" to "detail_page_more_related",
+                        "book_id" to id,
+                        "new_search_middle_page" to "false",
+                        "bookstore_tab_type" to "0",
+                        "query_history_removed" to "false",
+                        "user_is_login" to "0",
+                        "bookstore_tab" to "0",
+                        "search_middle_page_version" to "0",
+                        "pad_column_detail" to "0",
+                        "hot_word_exchange" to "false",
+                        "device_level" to "3",
+                        "limit" to "0",
+                        "offset" to "0",
+                        "is_horizontal_screen" to "false",
+                        "reader_single_col_from_ip_strategy" to "false",
+                    )
+                )
+            }
+        for (host in
+            listOf(
+                "api5-normal-sinfonlinec.fqnovel.com",
+                "api5-normal-hl.fqnovel.com",
+                "api5-normal-lf.fqnovel.com",
+            )) {
+            try {
+                val request = signer.sign("https://$host/reading/bookapi/plan/v:version/", values)
+                val raw = text(request.url, request)
+                if (raw.isBlank()) {
+                    failure = IOException("相关作品接口暂无响应")
+                    continue
+                }
+                val rows = RelatedWorks.parse(raw, id)
+                synchronized(relatedCache) {
+                    if (relatedCache.size >= 8) relatedCache.remove(relatedCache.keys.first())
+                    relatedCache[id] = rows
+                }
+                return rows
+            } catch (problem: Exception) {
+                if (Thread.currentThread().isInterrupted) throw problem
+                failure = problem
+            }
+        }
+        throw IOException("相关作品暂时无法加载，请重试", failure)
+    }
+
     fun detail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
         val o=router("$site/detail?series_id=$id").optJSONObject("detail_page")?.optJSONObject("seriesDetail") ?: throw IOException("剧集详情暂不可用")

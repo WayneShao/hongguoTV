@@ -162,13 +162,17 @@ class Library(context: Context) {
     var frameMode: VideoFrameMode
         get() = state().settings.frame
         set(value) { if (value != frameMode) { state().settings = state().settings.copy(frame = value); put("frameMode", value.name) } }
+    var seasonAutoplay: Boolean
+        get() = state().settings.seasonAutoplay
+        set(value) { if (value != seasonAutoplay) { state().settings = state().settings.copy(seasonAutoplay = value); put("seasonAutoplay", value) } }
     fun snapshot() = state().snapshot()
     fun restore(incoming: BackupData, restoreSettings: Boolean) {
         val merged = LibraryBackup.merge(snapshot(), incoming, restoreSettings)
         index = LibraryIndex(merged, state().updates())
         persist("favorites", "later", "progress", "watched", "hidden", "searches", "favoriteUpdates")
         writes.submit(mapOf("quality" to { merged.settings.quality }, "playbackSpeed" to { merged.settings.speed },
-            "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name }))
+            "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name },
+            "seasonAutoplay" to { merged.settings.seasonAutoplay }))
         flush()
     }
     /** Requests prompt background commit, without lifecycle-thread disk waits. */

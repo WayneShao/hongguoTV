@@ -1,0 +1,21 @@
+{
+  "code": 0,
+  "data": [
+    {
+      "show_type": 547,
+      "video_data": [
+        {"series_id": "7689759731010767896", "title": "末世选择，从解析神明开始成神", "content_type": 1004, "episode_cnt": 111, "season_index": 1, "disable_play": false},
+        {"series_id": "7702023183850818585", "title": "末世选择，从解析神明开始成神第三季", "content_type": 1004, "episode_cnt": 116, "season_index": 3, "disable_play": false},
+        {"series_id": "7703841305306090521", "title": "末世选择，从解析神明开始成神第四季", "content_type": 1007, "episode_cnt": 0, "season_index": 4, "disable_play": false},
+        {"series_id": "7696088249919343678", "title": "末世解析之生死光影", "content_type": 1004, "episode_cnt": 136, "season_index": 0, "disable_play": false},
+        {"series_id": "7696525829555112985", "title": "末世序列：觉醒解析之眼第一季", "content_type": 1004, "episode_cnt": 101, "season_index": 0, "disable_play": false},
+        {"series_id": "7698002458999540798", "title": "末世途则：解析选择绝境必活", "content_type": 1004, "episode_cnt": 215, "season_index": 0, "disable_play": false},
+        {"series_id": "7688335679255743512", "title": "末日选择：只有我知道答案", "content_type": 1004, "episode_cnt": 113, "season_index": 1, "disable_play": false},
+        {"series_id": "7699027569684778009", "title": "末日选择：只有我知道答案第二季", "content_type": 1004, "episode_cnt": 106, "season_index": 2, "disable_play": false},
+        {"series_id": "7693748881384819737", "title": "末世途则：解析万物末世封神", "content_type": 1004, "episode_cnt": 341, "season_index": 1, "disable_play": false},
+        {"series_id": "7697853999940111422", "title": "末世途则：解析万物末世封神", "content_type": 1004, "episode_cnt": 181, "season_index": 2, "disable_play": false},
+        {"series_id": "7694203474925325336", "title": "末世途则：从一只蟑螂开始", "content_type": 1004, "episode_cnt": 83, "season_index": 0, "disable_play": false}
+      ]
+    }
+  ]
+}
