@@ -121,26 +121,48 @@ object UpdateFiles {
     }
 }
 
+/** 默认直连 GitHub；仅网络失败时按所选线路回退到已验证的镜像。 */
 class AppUpdateRepository(
     private val packageName: String = "com.hongguotv.nativeapp",
     private val embeddedVoice: Boolean = false,
+    private val route: () -> String = { "auto" },
     configure: (OkHttpClient.Builder) -> Unit = {},
 ) : java.io.Closeable {
+    private val permitted = permittedHosts()
     private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(0, TimeUnit.MILLISECONDS).addNetworkInterceptor { chain ->
             val url = chain.request().url
-            // Follow GitHub's CDN redirects, never cleartext or arbitrary manifest-provided hosts.
-            if (url.scheme != "https" || url.host !in setOf("api.github.com", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"))
+            // 只跟随 GitHub 及其 CDN 的 HTTPS 跳转，绝不允许明文或清单提供的任意主机。
+            if (url.scheme != "https" || url.host !in permitted)
                 throw IOException("更新下载地址不受支持")
             chain.proceed(chain.request())
         }.apply(configure).build()
     private fun request(url: String) = Request.Builder().url(url).header("User-Agent", "HongguoTV-Updater")
         .header("Cache-Control", "no-cache").build()
     fun latest(): AppUpdate {
-        val call = http.newCall(request(AppUpdate.RELEASE_API))
+        var failure: IOException? = null
+        for (url in routed(AppUpdate.RELEASE_API, route())) {
+            if (Thread.currentThread().isInterrupted) throw IOException("检查更新已取消")
+            try {
+                return release(url)
+            } catch (e: NoReleaseException) {
+                // 直连明确表示没有正式版本时，镜像不会改变结论，也不再拖延等待。
+                if (url == AppUpdate.RELEASE_API) throw e
+                failure = e
+            } catch (e: IOException) {
+                failure = e
+            }
+        }
+        throw failure ?: IOException("无法检查更新，请稍后重试")
+    }
+    private fun release(url: String): AppUpdate {
+        val call = http.newCall(request(url))
         call.timeout().timeout(25, TimeUnit.SECONDS)
         return call.execute().use { response ->
-            if (!response.isSuccessful) throw IOException(if (response.code == 404) "尚无可用的自动更新版本" else "无法检查更新，请稍后重试")
+            if (!response.isSuccessful) throw when (response.code) {
+                404 -> NoReleaseException()
+                else -> IOException("无法检查更新，请稍后重试")
+            }
             val bytes = response.body?.byteStream()?.use { input ->
                 val out = ByteArrayOutputStream(); val buffer = ByteArray(4096)
                 while (true) { val n = input.read(buffer); if (n < 0) break; if (out.size() + n > 65536) throw IOException("更新信息过大"); out.write(buffer, 0, n) }
@@ -152,7 +174,20 @@ class AppUpdateRepository(
     }
     fun download(update: AppUpdate, file: File, progress: (Int) -> Unit) {
         if (UpdateFiles.verify(file, update)) return
-        http.newCall(request(update.downloadUrl)).execute().use { response ->
+        var failure: IOException? = null
+        for (url in routed(update.downloadUrl, route())) {
+            if (Thread.currentThread().isInterrupted) throw IOException("下载已取消")
+            try { fetch(url, update, file, progress); return }
+            catch (e: IOException) {
+                // 用户取消后不得继续尝试镜像，否则会拖慢退出并误报失败原因。
+                if (Thread.currentThread().isInterrupted) throw e
+                failure = e
+            }
+        }
+        throw failure ?: IOException("安装包下载失败，请稍后重试")
+    }
+    private fun fetch(url: String, update: AppUpdate, file: File, progress: (Int) -> Unit) {
+        http.newCall(request(url)).execute().use { response ->
             if (!response.isSuccessful) throw IOException("安装包下载失败，请稍后重试")
             val body = response.body ?: throw IOException("安装包为空")
             if (body.contentLength() >= 0 && body.contentLength() != update.size) throw IOException("安装包长度异常")
@@ -161,4 +196,29 @@ class AppUpdateRepository(
     }
     fun cancel() = http.dispatcher.cancelAll()
     override fun close() { cancel(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
+
+    companion object {
+        /** 只开放 2026-11-09 复测可用的镜像转发；其余站点未通过元数据与 APK 双重验证。 */
+        val DEFAULT_ACCELERATORS = listOf("https://gh-proxy.com/")
+        private val GITHUB_HOSTS = setOf("api.github.com", "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com")
+        /** 仅接受根路径的 HTTPS 前缀，防止把下载引向任意路径或明文主机。 */
+        fun hostOf(prefix: String): String? = try {
+            val uri = java.net.URI(prefix)
+            if (uri.scheme != "https" || uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null || uri.port !in setOf(-1, 443)) null
+            else uri.host?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) { null }
+        /** 直连优先，随后每个可用镜像各试一次。 */
+        fun accelerated(url: String, accelerators: List<String> = DEFAULT_ACCELERATORS): List<String> =
+            listOf(url) + accelerators.mapNotNull { prefix -> hostOf(prefix)?.let { prefix.trimEnd('/') + "/" + url } }
+        /** 显式镜像只走镜像，不等待直连，也不会静默换线。 */
+        fun routed(url: String, route: String, accelerators: List<String> = DEFAULT_ACCELERATORS): List<String> = when (route) {
+            "direct" -> listOf(url)
+            in accelerators -> listOf(route.trimEnd('/') + "/" + url)
+            else -> accelerated(url, accelerators)
+        }
+        fun permittedHosts(accelerators: List<String> = DEFAULT_ACCELERATORS): Set<String> =
+            GITHUB_HOSTS + accelerators.mapNotNull(::hostOf)
+    }
 }
+
+private class NoReleaseException : IOException("尚无可用的自动更新版本")

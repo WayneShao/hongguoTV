@@ -158,4 +158,88 @@ class AppUpdatesTest {
         file.writeBytes(bytes); assertTrue(UpdateFiles.verify(file, update()))
         file.writeBytes(ByteArray(bytes.size)); assertFalse(UpdateFiles.verify(file, update()))
     }
+
+    @Test fun selectedRouteOnlyUsesVerifiedForwarding() {
+        val url = update().downloadUrl
+        val mirror = AppUpdateRepository.DEFAULT_ACCELERATORS.single()
+        assertEquals(listOf(url), AppUpdateRepository.routed(url, "direct"))
+        assertEquals(listOf(mirror + url), AppUpdateRepository.routed(url, mirror))
+        assertEquals(listOf(url, mirror + url), AppUpdateRepository.routed(url, "auto"))
+        assertEquals(listOf(url, mirror + url), AppUpdateRepository.routed(url, "https://untrusted.invalid/"))
+        assertEquals(setOf("gh-proxy.com"), AppUpdateRepository.DEFAULT_ACCELERATORS.mapNotNull(AppUpdateRepository::hostOf).toSet())
+        assertTrue(AppUpdateRepository.permittedHosts().contains("gh-proxy.com"))
+        assertFalse(AppUpdateRepository.permittedHosts().contains("untrusted.invalid"))
+    }
+
+    @Test fun automaticRouteFallsBackToMirrorAfterDirectNetworkFailure() = withFile { destination ->
+        val release = releaseJson()
+        release.getJSONArray("assets").getJSONObject(2).put("size", bytes.size)
+            .put("digest", "sha256:" + MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
+        val mirror = AppUpdateRepository.DEFAULT_ACCELERATORS.single()
+        val paths = mutableListOf<String>()
+        AppUpdateRepository("com.hongguotv.rayneo", true, { "auto" }, { builder ->
+            builder.addInterceptor { chain ->
+                val request = chain.request(); paths += request.url.toString()
+                if (request.url.host != "gh-proxy.com") throw IOException("network down")
+                val value = if (request.url.encodedPath.endsWith(".apk")) bytes else release.toString().toByteArray()
+                okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(okhttp3.ResponseBody.create(null, value)).build()
+            }
+        }).use { repository ->
+            val selected = repository.latest(); repository.download(selected, destination) {}
+            assertTrue(UpdateFiles.verify(destination, selected))
+            assertEquals(listOf(AppUpdate.RELEASE_API, mirror + AppUpdate.RELEASE_API,
+                selected.downloadUrl, mirror + selected.downloadUrl), paths)
+        }
+    }
+
+    @Test fun explicitMirrorNeverTouchesDirectGitHub() = withFile { destination ->
+        val release = releaseJson()
+        release.getJSONArray("assets").getJSONObject(2).put("size", bytes.size)
+            .put("digest", "sha256:" + MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) })
+        val mirror = AppUpdateRepository.DEFAULT_ACCELERATORS.single()
+        val paths = mutableListOf<String>()
+        AppUpdateRepository("com.hongguotv.rayneo", true, { mirror }, { builder ->
+            builder.addInterceptor { chain ->
+                val request = chain.request(); paths += request.url.toString()
+                assertEquals("gh-proxy.com", request.url.host)
+                val value = if (request.url.encodedPath.endsWith(".apk")) bytes else release.toString().toByteArray()
+                okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(okhttp3.ResponseBody.create(null, value)).build()
+            }
+        }).use { repository ->
+            val selected = repository.latest(); repository.download(selected, destination) {}
+            assertTrue(UpdateFiles.verify(destination, selected))
+            assertEquals(listOf(mirror + AppUpdate.RELEASE_API, mirror + selected.downloadUrl), paths)
+        }
+    }
+
+    @Test fun directMissingReleaseDoesNotWaitForMirror() {
+        val paths = mutableListOf<String>()
+        AppUpdateRepository("com.hongguotv.rayneo", true, { "auto" }, { builder ->
+            builder.addInterceptor { chain ->
+                paths += chain.request().url.toString()
+                okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1).code(404).message("absent")
+                    .body(okhttp3.ResponseBody.create(null, ByteArray(0))).build()
+            }
+        }).use { repository ->
+            assertThrows(IOException::class.java) { repository.latest() }
+        }
+        assertEquals(listOf(AppUpdate.RELEASE_API), paths)
+    }
+
+    @Test fun cancelledCheckDoesNotTryMirror() {
+        val paths = mutableListOf<String>()
+        AppUpdateRepository("com.hongguotv.rayneo", true, { "auto" }, { builder ->
+            builder.addInterceptor { chain ->
+                paths += chain.request().url.toString()
+                Thread.currentThread().interrupt()
+                throw IOException("network down")
+            }
+        }).use { repository ->
+            try { assertThrows(IOException::class.java) { repository.latest() } }
+            finally { assertTrue(Thread.interrupted()) }
+        }
+        assertEquals(listOf(AppUpdate.RELEASE_API), paths)
+    }
 }
