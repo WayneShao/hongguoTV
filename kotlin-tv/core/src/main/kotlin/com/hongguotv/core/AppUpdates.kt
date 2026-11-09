@@ -129,6 +129,8 @@ class AppUpdateRepository(
     configure: (OkHttpClient.Builder) -> Unit = {},
 ) : java.io.Closeable {
     private val permitted = permittedHosts()
+    /** 暂停、切线或销毁时置位；路由回退循环必须立即停止，不能再试下一个镜像。 */
+    @Volatile private var aborted = false
     private val http = com.hongguotv.core.HttpTransport.builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(0, TimeUnit.MILLISECONDS).addNetworkInterceptor { chain ->
             val url = chain.request().url
@@ -142,7 +144,7 @@ class AppUpdateRepository(
     fun latest(): AppUpdate {
         var failure: IOException? = null
         for (url in routed(AppUpdate.RELEASE_API, route())) {
-            if (Thread.currentThread().isInterrupted) throw IOException("检查更新已取消")
+            abortIfCancelled("检查更新已取消")
             try {
                 return release(url)
             } catch (e: NoReleaseException) {
@@ -153,6 +155,7 @@ class AppUpdateRepository(
                 failure = e
             }
         }
+        abortIfCancelled("检查更新已取消")
         throw failure ?: IOException("无法检查更新，请稍后重试")
     }
     private fun release(url: String): AppUpdate {
@@ -161,7 +164,8 @@ class AppUpdateRepository(
         return call.execute().use { response ->
             if (!response.isSuccessful) throw when (response.code) {
                 404 -> NoReleaseException()
-                else -> IOException("无法检查更新，请稍后重试")
+                // 保留真实状态码（例如镜像网关 504），不能笼统伪装成“稍后重试”。
+                else -> IOException("更新检查失败（HTTP ${response.code}）")
             }
             val bytes = response.body?.byteStream()?.use { input ->
                 val out = ByteArrayOutputStream(); val buffer = ByteArray(4096)
@@ -176,25 +180,31 @@ class AppUpdateRepository(
         if (UpdateFiles.verify(file, update)) return
         var failure: IOException? = null
         for (url in routed(update.downloadUrl, route())) {
-            if (Thread.currentThread().isInterrupted) throw IOException("下载已取消")
+            abortIfCancelled("下载已取消")
             try { fetch(url, update, file, progress); return }
             catch (e: IOException) {
                 // 用户取消后不得继续尝试镜像，否则会拖慢退出并误报失败原因。
-                if (Thread.currentThread().isInterrupted) throw e
+                if (aborted || Thread.currentThread().isInterrupted) throw e
                 failure = e
             }
         }
+        abortIfCancelled("下载已取消")
         throw failure ?: IOException("安装包下载失败，请稍后重试")
     }
     private fun fetch(url: String, update: AppUpdate, file: File, progress: (Int) -> Unit) {
         http.newCall(request(url)).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("安装包下载失败，请稍后重试")
+            if (!response.isSuccessful) throw IOException("安装包下载失败（HTTP ${response.code}）")
             val body = response.body ?: throw IOException("安装包为空")
             if (body.contentLength() >= 0 && body.contentLength() != update.size) throw IOException("安装包长度异常")
             body.byteStream().use { UpdateFiles.receive(it, file, update, progress) }
         }
     }
-    fun cancel() = http.dispatcher.cancelAll()
+    /** 每次新任务开始前清除取消标记，避免上一次暂停影响下一次检查。 */
+    fun resetCancellation() { aborted = false }
+    fun cancel() { aborted = true; http.dispatcher.cancelAll() }
+    private fun abortIfCancelled(message: String) {
+        if (aborted || Thread.currentThread().isInterrupted) throw IOException(message)
+    }
     override fun close() { cancel(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown() }
 
     companion object {
@@ -204,7 +214,8 @@ class AppUpdateRepository(
         /** 仅接受根路径的 HTTPS 前缀，防止把下载引向任意路径或明文主机。 */
         fun hostOf(prefix: String): String? = try {
             val uri = java.net.URI(prefix)
-            if (uri.scheme != "https" || uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null || uri.port !in setOf(-1, 443)) null
+            val rootPath = uri.rawPath.orEmpty().let { it.isEmpty() || it == "/" }
+            if (uri.scheme != "https" || uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null || uri.port !in setOf(-1, 443) || !rootPath) null
             else uri.host?.takeIf { it.isNotBlank() }
         } catch (_: Exception) { null }
         /** 直连优先，随后每个可用镜像各试一次。 */
