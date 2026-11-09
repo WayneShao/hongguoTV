@@ -8,7 +8,7 @@ class LibraryIndexTest {
     private fun progress(id: Int, position: Long = 100, updated: Long = id.toLong()) =
         BackupProgress(series(id), "${id + 1000}", 2, position, 60_000, false, updated)
     private fun data() = BackupData((1..500).map(::series), (1..200).map { progress(it) }, setOf("2"),
-        listOf(RecentSearch("测试", ContentType.SHORT)), BackupSettings(720, 1.5f, false, ContentType.SHORT, VideoFrameMode.FIT),
+        listOf(RecentSearch("测试", ContentType.SHORT)), BackupSettings(720, 1.5f, false, ContentType.SHORT, VideoFrameMode.FIT, true),
         listOf(series(3)), setOf("4"))
 
     @Test fun `legacy keys round trip without dropping metadata or settings`() {
@@ -16,7 +16,7 @@ class LibraryIndexTest {
         val values = mapOf("favorites" to LibraryDisk.series(original.favorites), "progress" to LibraryDisk.history(original.history),
             "later" to LibraryDisk.series(original.later), "hidden" to original.hidden, "watched" to original.watched,
             "searches" to SearchHistory.encode(original.searches), "quality" to 720, "playbackSpeed" to 1.5f,
-            "autoNext" to false, "contentType" to "short", "frameMode" to "FIT",
+            "autoNext" to false, "contentType" to "short", "frameMode" to "FIT", "seasonAutoplay" to true,
             "favoriteUpdates" to LibraryDisk.updates(mapOf("1" to FavoriteUpdate(83, 80, 10))))
         val state = LibraryDisk.decode(values)
         assertEquals(original.copy(history = original.history.sortedByDescending { it.updatedAt }), state.snapshot())
