@@ -51,34 +51,75 @@ class PlaybackDeadlineTest {
     }
 
     @Test fun lockWaitIsClippedToRemainingDeadline() {
+        // 注入等待接缝后断言真实传入的等待时长，避免用宽松墙钟阈值掩盖固定 100ms 的缺陷。
         val store = Store(PlayerDevice("123", "456", "old", "", "").toJson())
-        val fresh = PlayerDevice("789", "987", "new", "", "")
-        val candidateEntered = java.util.concurrent.CountDownLatch(1)
-        val releaseCandidate = java.util.concurrent.CountDownLatch(1)
-        var now = 0L
-        val source = PlayerDeviceSource(OkHttpClient(), store = { store }, register = { fresh }, monotonicMillis = { now })
-        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
-        try {
-            val owner = pool.submit<String> {
-                source.recover { device ->
-                    if (device.deviceId == "123") throw DeviceRejectedException("old")
-                    candidateEntered.countDown(); releaseCandidate.await(); "candidate"
-                }
+        val waits = mutableListOf<Long>()
+        val source = PlayerDeviceSource(
+            OkHttpClient(),
+            store = { store },
+            register = { PlayerDevice("789", "987", "new", "", "") },
+            monotonicMillis = { 0L },
+            awaitLock = { lock, wait -> waits += wait; lock.lock(); true },
+        )
+        val result = RequestScope.withDeadline(40) {
+            source.recover<String> { device ->
+                if (device.deviceId == "123") throw DeviceRejectedException("old") else "candidate"
             }
-            assertTrue(candidateEntered.await(2, TimeUnit.SECONDS))
-            val started = System.nanoTime()
-            val failure = pool.submit<Throwable?> {
-                try {
-                    RequestScope.withDeadline(120) { source.recover<String> { throw DeviceRejectedException("old") } }
-                    null
-                } catch (error: Throwable) { error }
-            }.get(3, TimeUnit.SECONDS)
-            val elapsed = (System.nanoTime() - started) / 1_000_000
-            assertTrue("锁等待必须裁剪到剩余截止时间，实际 $failure", failure is PlaybackDeadlineException)
-            assertTrue("等待不应越过截止时间太多，实际 ${elapsed}ms", elapsed < 1_000)
-            releaseCandidate.countDown()
-            assertEquals("candidate", owner.get(2, TimeUnit.SECONDS))
-        } finally { releaseCandidate.countDown(); pool.shutdownNow() }
+        }
+        assertEquals("candidate", result)
+        assertEquals(1, waits.size)
+        assertTrue("等待必须裁剪到剩余截止时间，实际 ${waits.single()}ms", waits.single() <= 40)
+        assertTrue(waits.single() > 0)
+    }
+
+    @Test fun exhaustedDeadlineDuringLockWaitNeverRegistersOrFallsBack() {
+        val store = Store(PlayerDevice("123", "456", "old", "", "").toJson())
+        val waits = mutableListOf<Long>()
+        var registrations = 0
+        val source = PlayerDeviceSource(
+            OkHttpClient(),
+            store = { store },
+            register = { registrations++; PlayerDevice("789", "987", "new", "", "") },
+            monotonicMillis = { 0L },
+            awaitLock = { _, wait -> waits += wait; Thread.sleep(wait); false },
+        )
+        val failure = try {
+            RequestScope.withDeadline(40) { source.recover<String> { throw DeviceRejectedException("old") } }
+            null
+        } catch (error: Throwable) { error }
+        assertTrue("锁等待超时必须终止，实际 $failure", failure is PlaybackDeadlineException)
+        assertEquals(0, registrations)
+        assertTrue(waits.isNotEmpty())
+        assertTrue("每次等待都应裁剪到剩余截止时间，实际 $waits", waits.all { it <= 40 })
+    }
+
+    @Test fun canceledAuxiliaryRegistrationStopsKeyRetriesAndSleep() {
+        val scope = RequestScope()
+        val delays = mutableListOf<Long>()
+        var keyRequests = 0
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            when {
+                request.url.encodedPath.contains("device_register") ->
+                    Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                        .body("""{"device_id":"789","install_id":"987"}""".toResponseBody()).build()
+                request.url.encodedPath.contains("app_alert_check") -> {
+                    // 取消可能只表现为普通 IOException，线程不会中断。
+                    scope.cancel()
+                    throw IOException("Canceled")
+                }
+                else -> { keyRequests++; throw IOException("意外请求 ${request.url}") }
+            }
+        }.build()
+        val registrar = DeviceRegistrar(sleep = { delays += it })
+        val failure = try {
+            scope.run { registrar.register(http) }
+            null
+        } catch (error: Throwable) { error }
+        assertNotNull(failure)
+        assertTrue("取消必须作为终止条件抛出，实际 $failure", PlaybackFailure.terminal(failure!!))
+        assertEquals(0, keyRequests)
+        assertTrue("取消后不得进入重试等待", delays.isEmpty())
     }
 
     private class Store(private val value: String) : PlayerDeviceStore {
