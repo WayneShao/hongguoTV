@@ -27,6 +27,9 @@ internal class RelatedWorksView(
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
 
+    private fun lastEpisodeRow(): List<View> =
+        upper.takeLastWhile { it.parent === upper.lastOrNull()?.parent }
+
     private fun label(value: String, size: Float = 15f, color: Int = TvStyle.text) =
         TextView(context).apply {
             text = value
@@ -72,7 +75,7 @@ internal class RelatedWorksView(
                     setPadding(0, dp(8), 0, dp(8))
                 }
             )
-        upper.takeLast(10).forEach { it.nextFocusDownId = refresh.id }
+        lastEpisodeRow().forEach { it.nextFocusDownId = refresh.id }
     }
 
     fun loading() {
@@ -155,7 +158,7 @@ internal class RelatedWorksView(
         refreshButton?.nextFocusDownId = allButton.id
         allButton.nextFocusUpId = refreshButton?.id ?: allButton.id
         allButton.nextFocusDownId = cards.first().id
-        upper.takeLast(10).forEachIndexed { index, view ->
+        lastEpisodeRow().forEachIndexed { index, view ->
             view.nextFocusDownId = cards[minOf(index, cards.lastIndex)].id
         }
     }

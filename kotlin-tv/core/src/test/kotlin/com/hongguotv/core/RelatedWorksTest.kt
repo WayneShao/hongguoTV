@@ -34,6 +34,15 @@ class RelatedWorksTest {
             ),
         ).toString()
 
+    private fun work(
+        id: String,
+        title: String,
+        index: Int = 0,
+        type: Int = 1004,
+        upcoming: Boolean = false,
+        preview: Boolean = false,
+    ) = RelatedWork(Series(id, title, preview = preview), if (index > 0) "第${index}季" else "", upcoming, index, type)
+
     @Test fun parseKeepsOnlyActionableShortDramasFromTheRelatedCell() {
         val rows = RelatedWorks.parse(
             raw(
@@ -50,7 +59,9 @@ class RelatedWorksTest {
         assertEquals(listOf("222", "666"), rows.map { it.series.id })
         assertEquals("第2季", rows.first().season)
         assertFalse(rows.first().upcoming)
+        assertEquals(1004, rows.first().contentType)
         assertTrue(rows.last().upcoming)
+        assertEquals(1007, rows.last().contentType)
         assertEquals("第3季", rows.last().season)
     }
 
@@ -123,14 +134,30 @@ class RelatedWorksTest {
         )
     }
 
-    @Test fun unnumberedSeriesContinuesAtSeasonTwo() {
-        assertEquals(
-            "next",
+    @Test fun nextSeasonNeverInfersSeasonOneFromAnUnnumberedTitle() {
+        assertNull(
             RelatedWorks.nextSeason(
                 Series("1", "长剧"),
                 listOf(RelatedWork(Series("next", "长剧第二季"), "第2季", false, 2)),
-            )?.series?.id,
+            ),
         )
+        assertNull(
+            RelatedWorks.nextSeason(
+                Series("1", "长剧"),
+                listOf(RelatedWork(Series("next", "长剧"), "第2季", false, 2)),
+            ),
+        )
+    }
+
+    @Test fun nextSeasonRequiresExplicitCandidateNumberAndAgreeingMetadata() {
+        val current = Series("1", "长剧第二季")
+        fun next(vararg rows: RelatedWork) = RelatedWorks.nextSeason(current, rows.toList())
+        assertEquals("3", next(work("3", "长剧第三季", 3))?.series?.id)
+        assertEquals("3", next(work("3", "长剧第三季", 0))?.series?.id)
+        assertNull(next(work("3", "长剧第三季", 2)))
+        assertNull(next(work("3", "长剧", 3)))
+        assertNull(next(work("3", "长剧第三季番外", 3)))
+        assertNull(next(work("3", "长剧第三季", 4)))
     }
 
     private fun sample(name: String) = javaClass.getResource("/$name")!!.readText()
@@ -139,6 +166,7 @@ class RelatedWorksTest {
         val current = Series("7693090206953507864", "末世选择，从解析神明开始成神第二季", bookType = 0)
         val rows = RelatedWorks.parse(sample("related-resume-sample.json"), current.id)
         assertEquals("7702023183850818585", RelatedWorks.nextSeason(current, rows)?.series?.id)
+        assertEquals(1004, rows.first { it.series.id == "7702023183850818585" }.contentType)
         var loaded: String? = null
         val next = RelatedWorks.verifiedNextSeason(current, { rows }, { id ->
             loaded = id
@@ -160,6 +188,7 @@ class RelatedWorksTest {
                 "第3季",
                 false,
                 3,
+                1004,
             ),
         )
         var details = 0
@@ -173,7 +202,7 @@ class RelatedWorksTest {
 
     @Test fun verifiedNextSeasonRequiresMatchingDetailIdTitleAndEpisodes() {
         val current = Series("1", "长剧第二季")
-        val rows = listOf(RelatedWork(Series("2", "长剧第三季"), "第3季", false, 3))
+        val rows = listOf(work("2", "长剧第三季", 3))
         fun verify(detail: Detail) = RelatedWorks.verifiedNextSeason(current, { rows }, { detail })
         val good = Detail(Series("2", "长剧第三季"), listOf("episode-1"))
         assertEquals("2", verify(good)?.series?.id)
@@ -182,6 +211,41 @@ class RelatedWorksTest {
         assertNull(verify(Detail(Series("2", "长剧第三季"), emptyList())))
         assertNull(verify(Detail(Series("2", "长剧第三季"), listOf(""))))
         assertNull(verify(Detail(good.series.copy(preview = true), good.episodes)))
+    }
+
+    @Test fun verifiedNextSeasonRequiresAuthoritative1004Provenance() {
+        val current = Series("1", "长剧第二季")
+        var details = 0
+        fun verify(candidate: RelatedWork) = RelatedWorks.verifiedNextSeason(current, { listOf(candidate) }, {
+            details++
+            Detail(Series("2", "长剧第三季"), listOf("episode-1"))
+        })
+        assertNull(verify(work("2", "长剧第三季", 3, type = 1007)))
+        assertNull(verify(work("2", "长剧第三季", 3, type = 0)))
+        assertNull(verify(work("2", "长剧第三季", 3, type = 1005)))
+        assertEquals(0, details)
+        assertEquals("2", verify(work("2", "长剧第三季", 3))?.series?.id)
+        assertEquals(1, details)
+    }
+
+    @Test fun verifiedNextSeasonRejectsPreviewsAndKnownIncompatibleBookTypes() {
+        fun verify(
+            current: Series,
+            candidate: RelatedWork,
+            detail: Detail = Detail(Series("2", "长剧第三季"), listOf("episode-1")),
+        ) = RelatedWorks.verifiedNextSeason(current, { listOf(candidate) }, { detail })
+
+        val unknown = Series("1", "长剧第二季", bookType = 0)
+        val good = work("2", "长剧第三季", 3)
+        assertEquals("2", verify(unknown, good)?.series?.id)
+        assertNull(verify(unknown, good.copy(series = good.series.copy(preview = true))))
+        assertNull(verify(unknown, good, Detail(Series("2", "长剧第三季", preview = true), listOf("episode-1"))))
+        assertNull(verify(Series("1", "长剧第二季", preview = true), good))
+        assertNull(verify(Series("1", "长剧第二季", bookType = 1), good))
+        assertNull(verify(unknown, good, Detail(Series("2", "长剧第三季", bookType = 1), listOf("episode-1"))))
+        for (type in 2..5) {
+            assertEquals("2", verify(Series("1", "长剧第二季", bookType = type), good)?.series?.id)
+        }
     }
 
     @Test fun realProbeSampleKeepsAllFortyFourRowsAndRejectsDuplicateNextSeason() {

@@ -4,6 +4,7 @@ import android.app.Activity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.GridLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import com.hongguotv.core.RelatedWork
 import com.hongguotv.core.Series
@@ -23,6 +24,34 @@ class RelatedWorksViewTest {
         else listOf(view)
 
     private fun texts(view: View) = descendants(view).filterIsInstance<TextView>()
+
+    @Test fun relatedStripOnlyLinksTheActualLastEpisodeRow() {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        try {
+            for (columns in listOf(5, 10)) {
+                val page = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+                activity.setContentView(page)
+                val upper = LinearLayout(activity)
+                val lower = LinearLayout(activity)
+                page.addView(upper); page.addView(lower)
+                val episodes = (0 until columns + 2).map { index ->
+                    TextView(activity).apply {
+                        id = View.generateViewId()
+                        nextFocusDownId = id
+                        (if (index < columns) upper else lower).addView(this)
+                    }
+                }
+                val strip = RelatedWorksView(activity, episodes, { _, _ -> }, { "预约" }, { _, _ -> }, {})
+                page.addView(strip)
+                assertEquals(episodes[columns - 1].id, episodes[columns - 1].nextFocusDownId)
+                assertEquals(texts(strip).single { it.text == "刷新" }.id, episodes.last().nextFocusDownId)
+                strip.show(listOf(RelatedWork(Series("99", "长剧第三季"), "第3季", false, 3)))
+                assertEquals(episodes[columns - 1].id, episodes[columns - 1].nextFocusDownId)
+                assertNotEquals(episodes.last().id, episodes.last().nextFocusDownId)
+            }
+        } finally { controller.pause().stop().destroy() }
+    }
 
     @Test fun allSeasonsGridCanOpenTheFortiethSeasonAndClosesOnDetach() {
         val controller = Robolectric.buildActivity(Activity::class.java).setup()

@@ -7,7 +7,12 @@ import android.widget.Button
 import com.hongguotv.core.AppUpdateRepository
 import okhttp3.Protocol
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.Source
+import okio.Timeout
+import okio.buffer
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -18,6 +23,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowAlertDialog
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -95,6 +101,14 @@ class AppUpdaterTest {
         return condition()
     }
 
+    private fun awaitWorker(updater: AppUpdater) {
+        // A sentinel on the single worker runs only after cancellation handling and UI posts finish.
+        val worker=AppUpdater::class.java.getDeclaredField("worker").apply { isAccessible=true }.get(updater) as ExecutorService
+        val finished=CountDownLatch(1)
+        worker.execute { finished.countDown() }
+        assertTrue("取消后的工作线程应完成",finished.await(3,TimeUnit.SECONDS))
+    }
+
     @Test fun routeSwitchAfterFailedCheckRechecksImmediately() {
         val controller=Robolectric.buildActivity(Activity::class.java).setup();val activity=controller.get()
         activity.setTheme(android.R.style.Theme_Material_Dialog_Alert)
@@ -159,9 +173,9 @@ class AppUpdaterTest {
             updater.selectRoute(2)
             val switched="更新线路已切换为镜像 · gh-proxy.com，将重新检查更新"
             assertEquals(switched,updater.statusText)
-            release.countDown()
-            idleUntil { interrupted.get() }
-            Thread.sleep(100);shadowOf(Looper.getMainLooper()).idle()
+            awaitWorker(updater)
+            assertTrue("切线必须中断检查",interrupted.get())
+            shadowOf(Looper.getMainLooper()).idle()
             assertEquals("取消后不得继续尝试镜像",0,mirror.get())
             assertEquals("迟到的失败回调不得覆盖线路切换提示",switched,updater.statusText)
         } finally {release.countDown();updater.destroy();controller.pause().stop().destroy()}
@@ -181,6 +195,7 @@ class AppUpdaterTest {
             .put("assets",JSONArray().put(JSONObject().put("name","hongguoTV-TV-9.9.9.apk")
                 .put("size",payload.size).put("digest","sha256:"+digest)))
         val blocked=CountDownLatch(1);val releaseLatch=CountDownLatch(1)
+        val allowBytes=CountDownLatch(1)
         val interrupted=AtomicBoolean(false);val metadata=AtomicInteger(0)
         val downloads=AtomicInteger(0);val mirror=AtomicInteger(0)
         val repository=AppUpdateRepository(route = {
@@ -194,11 +209,31 @@ class AppUpdaterTest {
             }
             downloads.incrementAndGet()
             if(request.url.host=="gh-proxy.com") mirror.incrementAndGet()
-            blocked.countDown()
-            try { releaseLatch.await() } catch (e: InterruptedException) {
-                interrupted.set(true);Thread.currentThread().interrupt();throw IOException("cancelled",e)
-            }
-            throw IOException("blocked download released without response")
+            val source=object : Source {
+                var sent=false
+                override fun read(sink: Buffer, byteCount: Long): Long {
+                    try {
+                        if (!sent) {
+                            allowBytes.await();sent=true
+                            sink.write(payload,0,1)
+                            return 1L
+                        }
+                        // The previous byte has been written and its progress callback posted.
+                        blocked.countDown();releaseLatch.await()
+                    } catch (e: InterruptedException) {
+                        interrupted.set(true);Thread.currentThread().interrupt();throw IOException("cancelled",e)
+                    }
+                    throw IOException("blocked download released without response")
+                }
+                override fun timeout()=Timeout.NONE
+                override fun close() {}
+            }.buffer()
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body(object : ResponseBody() {
+                    override fun contentType()=null
+                    override fun contentLength()=payload.size.toLong()
+                    override fun source()=source
+                }).build()
         }}
         val updater=AppUpdater(activity,repository){true}
         try {
@@ -206,16 +241,19 @@ class AppUpdaterTest {
             ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
             assertTrue("元数据检查应完成",idleUntil(5_000) { metadata.get()>=1 })
             assertTrue("应进入 APK 下载并阻塞",idleUntil(5_000) { downloads.get()>=1 })
+            allowBytes.countDown()
+            assertTrue("字节进度应已排队且后续读取阻塞",blocked.await(2,TimeUnit.SECONDS))
+            assertFalse("进度回调尚未执行",updater.statusText.contains("%"))
             assertEquals(1,downloads.get())
             updater.selectRoute(2)
             val switched="更新线路已切换为镜像 · gh-proxy.com，将重新检查更新"
             assertEquals(switched,updater.statusText)
-            releaseLatch.countDown()
-            idleUntil { interrupted.get() }
-            Thread.sleep(100);shadowOf(Looper.getMainLooper()).idle()
+            awaitWorker(updater)
+            assertTrue("切线必须中断下载",interrupted.get())
+            shadowOf(Looper.getMainLooper()).idle()
             assertEquals("取消下载后不得继续尝试镜像",0,mirror.get())
             assertEquals("不得重复发起下载",1,downloads.get())
             assertEquals("迟到的下载失败回调不得覆盖线路切换提示",switched,updater.statusText)
-        } finally {releaseLatch.countDown();updater.destroy();controller.pause().stop().destroy()}
+        } finally {allowBytes.countDown();releaseLatch.countDown();updater.destroy();controller.pause().stop().destroy()}
     }
 }
