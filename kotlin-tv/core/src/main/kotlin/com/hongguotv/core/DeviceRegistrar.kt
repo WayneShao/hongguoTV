@@ -46,7 +46,7 @@ internal class DeviceRejectedException(message: String) : java.io.IOException(me
 internal class DeviceRegistrar(
     private val clock: () -> Long = System::currentTimeMillis,
     private val random: SecureRandom = SecureRandom(),
-    private val sleep: (Long) -> Unit = { ms -> runCatching { Thread.sleep(ms) } },
+    private val sleep: (Long) -> Unit = { ms -> Thread.sleep(ms) },
 ) {
     private inner class DevInfo(
         val osApi: String, val osVersion: String, val openudid: String, val cdid: String,
@@ -90,9 +90,18 @@ internal class DeviceRegistrar(
     fun register(http: OkHttpClient): PlayerDevice {
         val di = newDevInfo()
         val (deviceId, installId) = deviceRegister(http, di)
-        runCatching { appAlertCheck(http, di, deviceId, installId) }
-        val secretKey = runCatching { registerKey(http, di, deviceId, installId) }.getOrDefault("")
+        // 辅助请求可以失败，但截止时间与取消必须向上传播，不能被 best-effort 吞掉。
+        try { appAlertCheck(http, di, deviceId, installId) } catch (e: Exception) { rethrowTerminal(e) }
+        val secretKey = try { registerKey(http, di, deviceId, installId) } catch (e: Exception) {
+            rethrowTerminal(e)
+            ""
+        }
         return PlayerDevice(deviceId, installId, di.cdid, di.openudid, secretKey)
+    }
+
+    private fun rethrowTerminal(error: Exception) {
+        if (PlaybackFailure.terminal(error) || Thread.currentThread().isInterrupted)
+            throw error
     }
 
     private fun newDevInfo(): DevInfo {
@@ -152,7 +161,7 @@ internal class DeviceRegistrar(
             .header("user-agent", di.userAgent)
             .header("connection", "Keep-Alive")
         for ((k, v) in PlayerSigner.registrationHeaders(query, null)) builder.header(k, v)
-        runCatching { execute(http, builder.build()) }
+        try { execute(http, builder.build()) } catch (e: Exception) { rethrowTerminal(e) }
     }
 
 
@@ -182,6 +191,8 @@ internal class DeviceRegistrar(
                 return decryptRegisterKey(key).hex().uppercase()
             } catch (e: Exception) {
                 lastError = e
+                // 截止时间或取消是终止条件，重试等待不得吞掉。
+                rethrowTerminal(e)
                 // 注册重试同样受本次获取的总时限约束，超时后立即终止。
                 RequestScope.sleepWithinDeadline(1000, sleep)
             }

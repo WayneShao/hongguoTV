@@ -26,7 +26,7 @@ data class StreamInfo(val url: String, val key: ByteArray?, val quality: String,
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 class DeviceIdentityRejectedException(message: String): IOException(message)
 
-class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, private val prepareIdentityRetry: (() -> Unit)? = null, private val commitIdentityRetry: (() -> Unit)? = null, private val rollbackIdentityRetry: (() -> Unit)? = null) {
+class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, private val prepareIdentityRetry: (() -> Unit)? = null, private val commitIdentityRetry: (() -> Unit)? = null, private val rollbackIdentityRetry: (() -> Unit)? = null, private val routeClock: () -> Long = { System.nanoTime() / 1_000_000 }) {
     private val modelHttp=http.newBuilder().retryOnConnectionFailure(false).build()
     private val signer = Signer()
     private val devices = PlayerDeviceSource(http, recoverEmpty = true)
@@ -39,7 +39,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private fun routesFor(device: PlayerDevice): PlaybackRoutes = synchronized(routeHealth) {
         routeHealth.getOrPut("${device.deviceId}:${device.installId}") { PlaybackRoutes() }
     }
-    private fun routeNow() = System.nanoTime() / 1_000_000
+    private fun routeNow() = routeClock()
     private val websiteSearches = linkedMapOf<String, Long>()
     private val site = "https://hongguoduanju.com"
     private data class SearchCursor(val deviceId: String, val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
@@ -223,7 +223,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             PlaybackRoutes.PHOENIX to Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.PHOENIX_URL, device), PlayerDeviceSource.phoenixBody(id), mapOf("User-Agent" to VendorConstants.VIDEO_UA, "Accept" to "application/json; charset=utf-8,application/x-protobuf", "Content-Type" to "application/json", "x-xs-from-web" to "0", "sdk-version" to "2")),
         )
         val routes = routesFor(device)
-        for (routeId in routes.plan(routeNow())) {
+        val plan = routes.plan(routeNow())
+        for (routeId in plan.routes) {
             val (url, body, headers) = requests.getValue(routeId)
             try {
                 val signed = PlayerSigner.headers(url.substringAfter('?', ""), body)
@@ -274,9 +275,11 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 if (incompatibleModel) throw NoCompatibleStreamException()
                 if (rejected) throw DeviceRejectedException("播放设备已被上游拒绝")
                 if (transportFailure != null) throw transportFailure
-                if (emptyRoutes.size == requests.size || routes.exhausted(routeNow())) {
-                    if(PlaybackRequestBudget.current.get()?.claimTabFallback()==true) return tabStream(id,maxQuality,device)
-                    throw EmptyPlaybackException()
+                // 只有完整探测了全部 POST 线路的空结果才算完整空轮次；冷却跳过的半轮只报空，不推动换身份。
+                val probedEveryRoute = plan.complete && emptyRoutes.size == requests.size
+                if (emptyRoutes.isNotEmpty() && emptyRoutes.size == plan.routes.size) {
+                    if (probedEveryRoute && PlaybackRequestBudget.current.get()?.claimTabFallback()==true) return tabStream(id,maxQuality,device)
+                    throw EmptyPlaybackException(probedEveryRoute)
                 }
                 if (!sawResponse) throw IOException("播放接口暂不可用")
                 throw NoCompatibleStreamException()

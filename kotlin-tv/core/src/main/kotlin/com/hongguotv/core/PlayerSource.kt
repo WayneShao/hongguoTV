@@ -50,13 +50,19 @@ internal class PlayerDeviceSource(
             }
         } } catch (failure: Exception) {
             RequestScope.ensureActive()
-            val empty = recoverEmpty && failure is EmptyPlaybackException
-            if (failure !is DeviceRejectedException && !empty) {
+            val emptyFailure = (failure as? EmptyPlaybackException)?.takeIf { recoverEmpty }
+            if (failure !is DeviceRejectedException && emptyFailure == null) {
                 synchronized(state) { if(state.epoch==epoch) state.emptyRounds=0 }
                 throw failure
             }
             try {
-                while (!state.lock.tryLock(100, java.util.concurrent.TimeUnit.MILLISECONDS)) RequestScope.ensureActive()
+                while (true) {
+                    RequestScope.ensureActive()
+                    val remaining = RequestScope.remainingMillis()
+                    if (remaining != null && remaining <= 0) throw PlaybackDeadlineException()
+                    val wait = if (remaining == null) LOCK_WAIT_MILLIS else minOf(LOCK_WAIT_MILLIS, remaining)
+                    if (state.lock.tryLock(wait, java.util.concurrent.TimeUnit.MILLISECONDS)) break
+                }
             } catch (interrupted: InterruptedException) {
                 Thread.currentThread().interrupt()
                 throw java.io.InterruptedIOException("请求已取消")
@@ -67,8 +73,12 @@ internal class PlayerDeviceSource(
                 if (latest != active) return block(latest)
                 synchronized(state) {
                     if(state.epoch!=epoch) throw failure
-                    if(empty && ++state.emptyRounds<2) throw failure
-                    if(empty && state.attemptedInFailurePeriod) throw failure
+                    if(emptyFailure != null) {
+                        // 冷却跳过的半轮探测既不能累计，也不能把已有空轮次清零。
+                        if(!emptyFailure.completeRound) throw failure
+                        if(++state.emptyRounds<2) throw failure
+                    }
+                    if(emptyFailure != null && state.attemptedInFailurePeriod) throw failure
                     val now = monotonicMillis()
                     if (state.lastAttempt?.let { now - it < cooldownMillis } == true) throw failure
                     state.lastAttempt = now
@@ -87,6 +97,7 @@ internal class PlayerDeviceSource(
 
 
     companion object {
+        private const val LOCK_WAIT_MILLIS = 100L
         private val recoveryStates = java.util.WeakHashMap<Any, RecoveryState>()
         // The shortplay video_model URL from fetchShortplayVideoModel.
         internal const val SHORTPLAY_URL = "https://api3-normal-sinfonlinea.fqnovel.com/novel/player/video_model/v1/?iid={install_id}&device_id={device_id}&aid=1967&app_name=novelapp&version_code=72132&version_name=7.2.1.32&device_platform=android&device_brand=Xiaomi&os_version=13&cdid={cdid}"

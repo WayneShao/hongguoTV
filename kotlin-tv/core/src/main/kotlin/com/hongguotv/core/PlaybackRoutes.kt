@@ -6,19 +6,18 @@ internal class PlaybackRoutes {
     private data class Health(var success: Long = Long.MIN_VALUE, var blockedUntil: Long = 0L, var empty: Boolean = false)
     private val health = POST_ROUTES.associateWith { Health() }
 
+    /** 本轮计划。complete 表示本次确实探测了全部 POST 线路，可据此判断完整空轮次。 */
+    data class Plan(val routes: List<Int>, val complete: Boolean)
+
     /** 可用线路按最近成功排序；全部冷却时只探测最早可恢复的一条，避免连续撞空。 */
     @Synchronized
-    fun plan(now: Long): List<Int> {
+    fun plan(now: Long): Plan {
         val available = POST_ROUTES.filter { health.getValue(it).blockedUntil <= now }
             .sortedByDescending { health.getValue(it).success }
-        if (available.isNotEmpty()) return available
-        return listOf(POST_ROUTES.minByOrNull { health.getValue(it).blockedUntil } ?: POST_ROUTES.first())
-    }
-
-    /** 所有 POST 线路都处于空响应冷却：本轮即使只探测一条，也仍算一次完整空轮次。 */
-    @Synchronized
-    fun exhausted(now: Long): Boolean = POST_ROUTES.all { route ->
-        health.getValue(route).let { it.empty && it.blockedUntil > now }
+        if (available.isNotEmpty()) return Plan(available, available.size == POST_ROUTES.size)
+        // 冷却中的线路不可用并不等于空响应；这种半轮探测不能算作完整空轮次。
+        val recovering = POST_ROUTES.minByOrNull { health.getValue(it).blockedUntil } ?: POST_ROUTES.first()
+        return Plan(listOf(recovering), false)
     }
 
     @Synchronized

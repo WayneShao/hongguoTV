@@ -52,7 +52,12 @@ class RequestScope {
         fun <T> withDeadline(millis: Long, action: () -> T): T {
             val previous = deadline.get()
             deadline.set(monotonic() + millis.coerceAtLeast(0))
-            try { return action() } finally { if(previous == null) deadline.remove() else deadline.set(previous) }
+            try {
+                val result = action()
+                // 正文读取可能在上限前结束，但随后的解析/选流仍不得越过绝对截止时间。
+                ensureActive()
+                return result
+            } finally { if(previous == null) deadline.remove() else deadline.set(previous) }
         }
         /** 剩余毫秒数；未设置截止点时返回 null。 */
         fun remainingMillis(): Long? = deadline.get()?.let { (it - monotonic()).coerceAtLeast(0) }

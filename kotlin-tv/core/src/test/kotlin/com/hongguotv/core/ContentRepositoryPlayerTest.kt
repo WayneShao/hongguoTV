@@ -27,13 +27,13 @@ class ContentRepositoryPlayerTest {
 
     @After fun clearStore() { ContentRepository.deviceStore = null }
 
-    private fun repository(respond: (Request) -> String): Pair<ContentRepository, FakeStore> {
+    private fun repository(routeClock: () -> Long = { System.nanoTime() / 1_000_000 }, respond: (Request) -> String): Pair<ContentRepository, FakeStore> {
         val store = FakeStore()
         ContentRepository.deviceStore = store
         return ContentRepository(OkHttpClient.Builder().addInterceptor { chain ->
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
                 .code(200).message("OK").body(respond(chain.request()).toResponseBody()).build()
-        }.build()) to store
+        }.build(), routeClock = routeClock) to store
     }
 
     private fun list(vararg entries: JSONObject) = JSONObject().apply {
@@ -266,9 +266,10 @@ class ContentRepositoryPlayerTest {
     @Test fun finalEmptyBodyRegistersCandidateAndValidatesSameEpisodeBeforeSaving() = verifyEmptyRecovery("")
     @Test fun finalEmptyModelRegistersCandidateAndValidatesSameEpisodeBeforeSaving() = verifyEmptyRecovery("""{"code":0,"data":{"123":{"video_model":{}}}}""")
 
-    @Test fun consecutiveEmptyPlaybackRoundsRotateIdentityOnlyOnce() {
+    @Test fun completeEmptyRoundsRotateOnlyAfterCooledRoutesAreProbedAgain() {
         var registrations = 0
-        val (repo, store) = repository { request ->
+        var now = 0L
+        val (repo, store) = repository(routeClock = { now }) { request ->
             when {
                 request.url.encodedPath.contains("device_register") -> {
                     registrations++
@@ -278,15 +279,24 @@ class ContentRepositoryPlayerTest {
                 else -> ""
             }
         }
-        repeat(3) { assertThrows(IOException::class.java) { repo.stream("123", 720) } }
-        assertEquals("failed identities never replace the stored candidate", deviceJson, store.value)
-        assertEquals("one candidate per continuous empty failure period", 1, registrations)
+        // 第 1 次：完整探测两条 POST 线路，计一次完整空轮次，尚不换身份。
+        assertThrows(IOException::class.java) { repo.stream("123", 720) }
+        assertEquals(0, registrations)
+        // 第 2 次紧接发生：线路仍在冷却，只探测一条，属于半轮，不累计也不清零。
+        assertThrows(IOException::class.java) { repo.stream("123", 720) }
+        assertEquals(0, registrations)
+        // 冷却结束后再次完整探测，累计到第二次完整空轮次才换身份。
+        now = PlaybackRoutes.EMPTY_COOLDOWN_MILLIS * 2
+        assertThrows(IOException::class.java) { repo.stream("123", 720) }
+        assertEquals("候选身份播放失败时不得覆盖已保存身份", 1, registrations)
+        assertEquals(deviceJson, store.value)
     }
 
     private fun verifyEmptyRecovery(emptyResponse: String) {
         var registrations=0
         var modelCalls=0
-        val (repo, store)=repository { request ->
+        var now=0L
+        val (repo, store)=repository(routeClock = { now }) { request ->
             when {
                 request.url.encodedPath.contains("device_register") -> { registrations++; """{"device_id":"789","install_id":"987"}""" }
                 request.url.host.endsWith("fqnovel.com") -> {
@@ -305,6 +315,8 @@ class ContentRepositoryPlayerTest {
         assertEquals(0,registrations)
         val firstRoundCalls=modelCalls
         assertTrue(firstRoundCalls<=8)
+        // 冷却跳过的半轮不算完整空轮次；冷却结束后再完整探测一轮才换身份。
+        now=PlaybackRoutes.EMPTY_COOLDOWN_MILLIS*2
         assertEquals("https://example.com/recovered",repo.stream("123",720).url)
         assertEquals(1,registrations)
         assertEquals("789",PlayerDevice.fromJson(store.value!!)!!.deviceId)
