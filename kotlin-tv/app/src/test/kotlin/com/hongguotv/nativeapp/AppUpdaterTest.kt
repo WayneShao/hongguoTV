@@ -22,6 +22,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.time.Duration
+import java.security.MessageDigest
+import org.json.JSONArray
+import org.json.JSONObject
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk=[28])
@@ -81,14 +84,15 @@ class AppUpdaterTest {
         } finally {updater.destroy();controller.pause().stop().destroy()}
     }
 
-    private fun idleUntil(timeoutMillis: Long = 3000, condition: () -> Boolean) {
+    private fun idleUntil(timeoutMillis: Long = 3000, condition: () -> Boolean): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMillis
         while (System.currentTimeMillis() < deadline) {
             shadowOf(Looper.getMainLooper()).idle()
-            if (condition()) return
+            if (condition()) return true
             Thread.sleep(10)
         }
         shadowOf(Looper.getMainLooper()).idle()
+        return condition()
     }
 
     @Test fun routeSwitchAfterFailedCheckRechecksImmediately() {
@@ -161,5 +165,57 @@ class AppUpdaterTest {
             assertEquals("取消后不得继续尝试镜像",0,mirror.get())
             assertEquals("迟到的失败回调不得覆盖线路切换提示",switched,updater.statusText)
         } finally {release.countDown();updater.destroy();controller.pause().stop().destroy()}
+    }
+
+    @Test fun routeSwitchDuringBlockedApkDownloadCancelsWithoutMirrorFallbackOrStaleCallbacks() {
+        val controller=Robolectric.buildActivity(Activity::class.java).setup();val activity=controller.get()
+        activity.setTheme(android.R.style.Theme_Material_Dialog_Alert)
+        activity.getSharedPreferences("app_updates",0).edit().clear().commit()
+        val anchor=Button(activity);activity.setContentView(anchor)
+        val payload="blocked-apk".toByteArray()
+        val digest=MessageDigest.getInstance("SHA-256").digest(payload).joinToString(""){"%02x".format(it)}
+        val release=JSONObject().put("tag_name","personal-9.9.9")
+            .put("body","说明\n<!-- hongguotv-update "+JSONObject().put("schema",1).put("variants",JSONObject().put("TV",
+                JSONObject().put("packageName","com.hongguotv.nativeapp").put("versionName","9.9.9-local")
+                    .put("versionCode",999).put("minSdk",26)))+" -->")
+            .put("assets",JSONArray().put(JSONObject().put("name","hongguoTV-TV-9.9.9.apk")
+                .put("size",payload.size).put("digest","sha256:"+digest)))
+        val blocked=CountDownLatch(1);val releaseLatch=CountDownLatch(1)
+        val interrupted=AtomicBoolean(false);val metadata=AtomicInteger(0)
+        val downloads=AtomicInteger(0);val mirror=AtomicInteger(0)
+        val repository=AppUpdateRepository(route = {
+            activity.getSharedPreferences("app_updates",0).getString("github_route","auto").orEmpty()
+        }) {builder -> builder.addInterceptor {chain ->
+            val request=chain.request()
+            if(request.url.host=="api.github.com") {
+                metadata.incrementAndGet()
+                return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(release.toString().toByteArray().toResponseBody()).build()
+            }
+            downloads.incrementAndGet()
+            if(request.url.host=="gh-proxy.com") mirror.incrementAndGet()
+            blocked.countDown()
+            try { releaseLatch.await() } catch (e: InterruptedException) {
+                interrupted.set(true);Thread.currentThread().interrupt();throw IOException("cancelled",e)
+            }
+            throw IOException("blocked download released without response")
+        }}
+        val updater=AppUpdater(activity,repository){true}
+        try {
+            updater.resume();updater.show(anchor)
+            ShadowAlertDialog.getLatestAlertDialog().getButton(AlertDialog.BUTTON_POSITIVE).performClick()
+            assertTrue("元数据检查应完成",idleUntil(5_000) { metadata.get()>=1 })
+            assertTrue("应进入 APK 下载并阻塞",idleUntil(5_000) { downloads.get()>=1 })
+            assertEquals(1,downloads.get())
+            updater.selectRoute(2)
+            val switched="更新线路已切换为镜像 · gh-proxy.com，将重新检查更新"
+            assertEquals(switched,updater.statusText)
+            releaseLatch.countDown()
+            idleUntil { interrupted.get() }
+            Thread.sleep(100);shadowOf(Looper.getMainLooper()).idle()
+            assertEquals("取消下载后不得继续尝试镜像",0,mirror.get())
+            assertEquals("不得重复发起下载",1,downloads.get())
+            assertEquals("迟到的下载失败回调不得覆盖线路切换提示",switched,updater.statusText)
+        } finally {releaseLatch.countDown();updater.destroy();controller.pause().stop().destroy()}
     }
 }

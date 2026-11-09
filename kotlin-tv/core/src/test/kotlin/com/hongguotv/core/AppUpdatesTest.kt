@@ -213,6 +213,30 @@ class AppUpdatesTest {
         assertFalse(File(destination.path + ".part").exists())
     }
 
+    @Test fun streamingFailureCleansPartialThenFallsBackToMirror() = withFile { destination ->
+        // 直连响应长度正确但内容校验失败：字节已写入临时文件后才失败，必须清理后再尝试镜像。
+        val corrupt = bytes.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        val mirror = AppUpdateRepository.DEFAULT_ACCELERATORS.single()
+        val paths = mutableListOf<String>()
+        AppUpdateRepository("com.hongguotv.rayneo", true, { "auto" }, { builder ->
+            builder.addInterceptor { chain ->
+                val request = chain.request(); paths += request.url.toString()
+                if (request.url.host == "gh-proxy.com")
+                    okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
+                        .code(504).message("Gateway Timeout").body(okhttp3.ResponseBody.create(null, ByteArray(0))).build()
+                else okhttp3.Response.Builder().request(request).protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200).message("OK").body(okhttp3.ResponseBody.create(null, corrupt)).build()
+            }
+        }).use { repository ->
+            val failure = assertThrows(IOException::class.java) { repository.download(update(), destination) {} }
+            assertTrue("必须保留镜像网关状态码，实际：${failure.message}", failure.message.orEmpty().contains("504"))
+        }
+        // 已写入的临时文件必须清理，且失败后仍尝试过一次已验证镜像。
+        assertEquals(listOf(update().downloadUrl, mirror + update().downloadUrl), paths)
+        assertFalse(destination.exists())
+        assertFalse(File(destination.path + ".part").exists())
+    }
+
     @Test fun automaticRouteFallsBackToMirrorAfterDirectNetworkFailure() = withFile { destination ->
         val release = releaseJson()
         release.getJSONArray("assets").getJSONObject(2).put("size", bytes.size)
