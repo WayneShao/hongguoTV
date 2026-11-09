@@ -182,7 +182,8 @@ internal class DeviceRegistrar(
                 return decryptRegisterKey(key).hex().uppercase()
             } catch (e: Exception) {
                 lastError = e
-                sleep(1000)
+                // 注册重试同样受本次获取的总时限约束，超时后立即终止。
+                RequestScope.sleepWithinDeadline(1000, sleep)
             }
         }
         throw lastError ?: java.io.IOException("注册密钥失败")
@@ -195,7 +196,7 @@ internal class DeviceRegistrar(
             if (!response.isSuccessful) throw java.io.IOException("设备注册请求失败（HTTP ${response.code}）")
             val body = response.body ?: throw java.io.IOException("设备注册响应为空")
             val input = body.byteStream(); val out = ByteArrayOutputStream(); val buffer = ByteArray(8192)
-            while (out.size() <= 4 * 1024 * 1024) { val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
+            while (out.size() <= 4 * 1024 * 1024) { RequestScope.ensureActive(); val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
             if (out.size() > 4 * 1024 * 1024) throw java.io.IOException("设备注册响应过大")
             out.toByteArray()
         }
