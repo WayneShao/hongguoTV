@@ -22,7 +22,7 @@ internal object AuthStore {
         if(raw.isBlank()) { repository.restoreSession(null); return }
         val session=runCatching { AuthSession.fromJson(JSONObject(raw)) }.getOrNull()
         if(session!=null) repository.restoreSession(session)
-        else prefs.edit().remove(KEY_SESSION).apply()
+        else { prefs.edit().remove(KEY_SESSION).apply(); repository.restoreSession(null) }
     }
 
     fun save(context: Context,session: AuthSession) {
