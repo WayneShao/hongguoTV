@@ -3,6 +3,8 @@ package com.hongguotv.nativeapp
 
 import android.app.Activity
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
@@ -32,6 +34,14 @@ internal class AccountScreen(
     private var status: TextView?=null
     private var poll: Runnable?=null
     private var page="home"
+    private var expiry: Runnable?=null
+    private var qrFrame: FrameLayout?=null
+    private var qrImage: ImageView?=null
+    private var zoomImage: ImageView?=null
+    private var zoomStatus: TextView?=null
+    private var zoomSurface: View?=null
+    private var zoomAnchor: View?=null
+    private var acceptedQr: Bitmap?=null
     private fun dp(n: Int)=(n*activity.resources.displayMetrics.density).toInt()
     private fun label(value: String,size: Float=16f)=TextView(activity).apply {
         text=value; textSize=size; setTextColor(Color.WHITE); setPadding(dp(6),dp(5),dp(6),dp(5))
@@ -43,7 +53,8 @@ internal class AccountScreen(
     }
     fun show(host: LinearLayout,section: String?=null,focusSeries: String?=null) { close(); parent=host; if(section==null) render() else listing(section,focusSeries) }
     private fun reset(): LinearLayout {
-        cancel(); val host=parent ?: error("Account screen detached")
+        cancel(); dismissZoom(); qrFrame=null; qrImage=null; zoomAnchor=null
+        val host=parent ?: error("Account screen detached")
         host.removeAllViews()
         val scroll=ScrollView(activity)
         val content=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(12),0,dp(12),dp(12)) }
@@ -74,34 +85,101 @@ internal class AccountScreen(
             body.addView(label("本机收藏和历史保留。登录前的访客记录不会批量上传。",13f))
         }
     }
-    private fun qr() {
+    private fun qr(enlarged: Boolean=false) {
         val body=reset(); page="qr"
+        val host=parent ?: return
+        val scroll=host.getChildAt(0); host.removeView(scroll)
+        val frame=FrameLayout(activity); frame.addView(scroll,FrameLayout.LayoutParams(-1,-1))
+        host.addView(frame,LinearLayout.LayoutParams(-1,-1)); qrFrame=frame
         action(body,"返回账号") { render() }.requestFocus()
         status=label("正在获取二维码…"); body.addView(status)
-        val image=ImageView(activity).apply { scaleType=ImageView.ScaleType.FIT_CENTER; setBackgroundColor(Color.WHITE) }
+        val image=newQrImage().apply { contentDescription="登录二维码，点击放大"; setOnClickListener { enlarge(this) } }
+        qrImage=image
         body.addView(image,LinearLayout.LayoutParams(dp(220),dp(220)))
-        action(body,"刷新二维码") { qr() }
+        lateinit var enlargeButton: View
+        enlargeButton=action(body,"放大二维码") { enlarge(enlargeButton) }; zoomAnchor=enlargeButton
+        action(body,"刷新二维码") { qr(zoomSurface!=null) }
+        if(enlarged) enlarge(zoomAnchor)
         task({ repository.createLoginQr() }) { qr ->
             val bytes=runCatching { Base64.decode(qr.image.substringAfter(','),Base64.DEFAULT) }.getOrNull()
             val bitmap=bytes?.let { BitmapFactory.decodeByteArray(it,0,it.size) }
-            if(bitmap==null) { status?.text="二维码图片无效，请刷新"; return@task }
-            image.setImageBitmap(bitmap); status?.text="请用手机红果扫码，并在手机上确认"
+            if(bitmap==null) { qrMessage("二维码图片无效，请刷新"); return@task }
+            acceptedQr=bitmap
+            displayQr(image,bitmap); zoomImage?.let { displayQr(it,bitmap) }
+            qrMessage("请用手机红果扫码，并在手机上确认")
+            val ticket=revision
+            expiry=Runnable { if(ticket==revision && page=="qr") expireQr() }.also {
+                main.postDelayed(it,(qr.expiresAt-System.currentTimeMillis()).coerceAtLeast(0))
+            }
             schedulePoll(qr.expiresAt)
         }
+    }
+    private fun newQrImage()=ImageView(activity).apply {
+        id=View.generateViewId(); scaleType=ImageView.ScaleType.FIT_CENTER
+        setBackgroundColor(Color.WHITE); isFocusable=true; isFocusableInTouchMode=true; isEnabled=false
+    }
+    private fun displayQr(image: ImageView,bitmap: Bitmap?) {
+        image.setImageDrawable(bitmap?.let { BitmapDrawable(activity.resources,it).apply { setFilterBitmap(false) } })
+        image.isEnabled=bitmap!=null
+    }
+    private fun qrMessage(message: String) { status?.text=message; zoomStatus?.text=message }
+    private fun enlarge(anchor: View?) {
+        if(zoomSurface!=null || page!="qr") return
+        zoomAnchor=anchor
+        val image=newQrImage(); zoomImage=image; displayQr(image,acceptedQr)
+        val body=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(12),dp(8),dp(12),dp(8)); setBackgroundColor(Color.rgb(20,20,20)) }
+        zoomStatus=label(status?.text.toString()).also(body::addView)
+        body.addView(image,LinearLayout.LayoutParams(dp(64),dp(64)))
+        action(body,"刷新二维码") { qr(true) }
+        val close=action(body,"关闭放大") { dismissZoom() }
+        val scroll=object: ScrollView(activity) {
+            override fun onMeasure(widthMeasureSpec: Int,heightMeasureSpec: Int) {
+                val width=View.MeasureSpec.getSize(widthMeasureSpec).coerceAtLeast(1)
+                val available=(width-body.paddingLeft-body.paddingRight).coerceAtLeast(1)
+                val childWidth=View.MeasureSpec.makeMeasureSpec(available,View.MeasureSpec.EXACTLY)
+                var controls=body.paddingTop+body.paddingBottom
+                for(index in 0 until body.childCount) {
+                    val child=body.getChildAt(index)
+                    if(child===image) continue
+                    child.measure(childWidth,View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED))
+                    val lp=child.layoutParams as LinearLayout.LayoutParams
+                    controls+=child.measuredHeight+lp.topMargin+lp.bottomMargin
+                }
+                val remaining=(View.MeasureSpec.getSize(heightMeasureSpec)-controls).coerceAtLeast(dp(64))
+                val side=minOf(available,remaining)
+                val params=image.layoutParams as LinearLayout.LayoutParams
+                if(params.width!=side || params.height!=side) image.layoutParams=params.apply {
+                    this.width=side; height=side; gravity=android.view.Gravity.CENTER_HORIZONTAL
+                }
+                super.onMeasure(widthMeasureSpec,heightMeasureSpec)
+            }
+        }
+        scroll.addView(body); zoomSurface=scroll
+        qrFrame?.getChildAt(0)?.visibility=View.GONE
+        qrFrame?.addView(scroll,FrameLayout.LayoutParams(-1,-1)); close.requestFocus()
+    }
+    private fun dismissZoom() {
+        zoomSurface?.let { qrFrame?.removeView(it) }; zoomSurface=null; zoomImage=null; zoomStatus=null
+        qrFrame?.getChildAt(0)?.visibility=View.VISIBLE
+        zoomAnchor?.takeIf { it.parent!=null }?.requestFocus()
+    }
+    private fun expireQr() {
+        cancel()
+        qrMessage("二维码已过期，请刷新")
     }
     private fun schedulePoll(expiresAt: Long) {
         val ticket=revision
         val next=Runnable {
             if(parent==null || revision!=ticket) return@Runnable
-            if(System.currentTimeMillis()>=expiresAt) { status?.text="二维码已过期，请刷新"; repository.cancelLoginQr(); return@Runnable }
+            if(System.currentTimeMillis()>=expiresAt) { expireQr(); return@Runnable }
             task({ repository.pollLoginQr() }) { result ->
                 when(result.status) {
                     LoginQrStatus.CONFIRMED -> {
                         val session=result.session ?: return@task
                         AuthStore.save(activity,session); changed(); render()
                     }
-                    LoginQrStatus.EXPIRED -> status?.text="二维码已过期，请刷新"
-                    else -> { status?.text=if(result.status==LoginQrStatus.SCANNED) "已扫码，请在手机上确认" else "等待手机扫码"; schedulePoll(expiresAt) }
+                    LoginQrStatus.EXPIRED -> expireQr()
+                    else -> { qrMessage(if(result.status==LoginQrStatus.SCANNED) "已扫码，请在手机上确认" else "等待手机扫码"); schedulePoll(expiresAt) }
                 }
             }
         }
@@ -147,14 +225,20 @@ internal class AccountScreen(
                     val message=it.message.orEmpty()
                     val expired=message.contains("未登录") || message.contains("登录已过期") || message.contains("请先登录")
                     if(expired) { repository.logout(); AuthStore.clear(activity); changed(); render(); status?.text="登录已过期，请重新扫码" }
-                    else if(it is AccountProfileUnavailableException) status?.text=it.message
-                    else status?.text="账号请求失败，请重试（${it.javaClass.simpleName}）"
+                    else if(it is AccountProfileUnavailableException) qrMessage(it.message.orEmpty())
+                    else qrMessage("账号请求失败，请重试（${it.javaClass.simpleName}）")
                 }
             }
         }
     }
-    private fun cancel() { revision++; poll?.let(main::removeCallbacks); poll=null; scope?.cancel(); future?.cancel(true); scope=null; future=null; repository.cancelLoginQr() }
-    fun goBack() { when(page) { "home" -> back(); "reservation" -> listing("reservations"); else -> render() } }
-    fun close() { cancel(); AuthStore.restore(activity,repository); parent=null; status=null }
+    private fun cancel() {
+        revision++; poll?.let(main::removeCallbacks); poll=null; expiry?.let(main::removeCallbacks); expiry=null
+        scope?.cancel(); future?.cancel(true); scope=null; future=null; repository.cancelLoginQr()
+        if(qrFrame!=null) AuthStore.restore(activity,repository)
+        acceptedQr=null
+        qrImage?.let { displayQr(it,null) }; zoomImage?.let { displayQr(it,null) }
+    }
+    fun goBack() { if(zoomSurface!=null) dismissZoom() else when(page) { "home" -> back(); "reservation" -> listing("reservations"); else -> render() } }
+    fun close() { cancel(); dismissZoom(); qrFrame=null; qrImage=null; zoomAnchor=null; AuthStore.restore(activity,repository); parent=null; status=null }
     fun destroy() { close(); worker.shutdownNow() }
 }
