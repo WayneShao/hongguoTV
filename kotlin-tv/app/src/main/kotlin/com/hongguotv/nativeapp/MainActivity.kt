@@ -38,40 +38,122 @@ class MainActivity: Activity() {
     private val cloudHistory=mutableMapOf<String,AccountHistoryItem>()
     private var cloudOwner=""
     private val accountOwners by lazy { getSharedPreferences("account-local-progress-owners",Context.MODE_PRIVATE) }
-    private var playbackAccount: AuthSession?=null
+    private val accountIntents by lazy { AccountIntents(this,accountRepository) }
+    @Volatile private var accountRetired=false
+    @Volatile private var accountReady=false
+    private fun accountNotReady() { notices.show("账号同步状态尚未就绪，请稍后重试",1) }
+    private var playbackAccount: AccountContext?=null
+    private var playbackRevision=0L
     private var accountReturn=false
     private var detailLocalSelection=true
     private fun detailProgress(id: String)=ResumePlayback.progress(detailLocalSelection,library.progress(id),if(detailLocalSelection) null else accountProgress(id))
     private var accountReturnSection: String?=null
-    private val accountHistorySync by lazy { AccountHistorySync(this,accountRepository) { session,rows ->
-        if(!isDestroyed && accountRepository.currentSession()?.user?.id==session.user.id) {
-            if(cloudOwner!=session.user.id) cloudHistory.clear()
-            cloudOwner=session.user.id
-            rows.forEach { row -> if((cloudHistory[row.series.id]?.readAt ?: 0L)<row.readAt) cloudHistory[row.series.id]=row }
+    private fun cloudKey(context: AccountContext)="${context.owner ?: context.credentialOwner}:${context.epoch}"
+    private fun selectionAllowed(context: AccountContext?): Boolean =
+        context!=null && !accountRetired && accountReady && accountIntents.isReady() && accountRepository.isCurrent(context)
+    private fun historyAllowed(context: AccountContext?,id: String,revision: Long): Boolean =
+        selectionAllowed(context) && accountIntents.historyAllowed(context!!,id,revision)
+    private fun pullAllowed(context: AccountContext?,generation: Long): Boolean =
+        selectionAllowed(context) && accountIntents.revision(context!!)==generation
+    private val accountHistorySync by lazy { AccountHistorySync(this,accountRepository,accountIntents) { context,rows ->
+        val revision=accountIntents.revision(context)
+        main.post {
+            if(!isDestroyed && pullAllowed(context,revision)) {
+                if(cloudOwner!=cloudKey(context)) cloudHistory.clear()
+                cloudOwner=cloudKey(context)
+                rows.filterNot { accountIntents.suppressHistory(context,it.series.id) }.forEach { row ->
+                    if((cloudHistory[row.series.id]?.readAt ?: 0L)<row.readAt) cloudHistory[row.series.id]=row
+                }
+            }
         }
     } }
+    private fun playbackHistoryAllowed(id: String,revision: Long): Boolean {
+        val original=playbackAccount ?: return false
+        if(!selectionAllowed(original)) return false
+        val context=accountRepository.captureAccount() ?: return false
+        return accountRepository.isCurrent(original) && historyAllowed(context,id,revision)
+    }
+    private fun playbackContextCurrent()=detailLocalSelection || (playbackAccount?.let(::selectionAllowed)==true)
+    private fun playbackHistoryCurrent(id: String)=detailLocalSelection || playbackHistoryAllowed(id,playbackRevision)
+    private fun staleHistorySelectionNow(id: String)=!detailLocalSelection && accountReturnSection=="history" && !playbackHistoryCurrent(id)
     private fun accountProgress(id: String): WatchProgress? {
-        val session=accountRepository.currentSession() ?: return library.progress(id)
-        val local=library.progress(id).takeIf { accountOwners.getString(id,null)==session.user.id }
-        val row=cloudHistory[id].takeIf { cloudOwner==session.user.id }
+        val original=playbackAccount ?: return null
+        if(!selectionAllowed(original)) return null
+        val context=accountRepository.captureAccount() ?: return null
+        if(!accountRepository.isCurrent(original) || !historyAllowed(context,id,playbackRevision)) return null
+        val stored=accountOwners.getString(id,null)
+        val legacy=context.session.user.id.takeIf { it.isNotBlank() && it!="0" }
+        val owned=context.owner!=null && (stored==context.owner || (legacy!=null && stored==legacy) || stored=="epoch:${context.credentialOwner}:${context.epoch}")
+        if(owned && stored!=context.owner) accountOwners.edit().putString(id,context.owner).apply()
+        val local=library.progress(id).takeIf { owned }
+        val row=cloudHistory[id].takeIf { cloudOwner==cloudKey(context) }
         return if(row!=null && row.readAt>(local?.updatedAt ?: 0L))
             WatchProgress(row.series,row.episodeId,row.episodeIndex,row.position,row.duration,false,row.readAt) else local
     }
     private fun accountChanged() {
-        cloudHistory.clear(); cloudOwner=accountRepository.currentSession()?.user?.id.orEmpty()
+        cloudHistory.clear(); cloudOwner=accountRepository.captureAccount()?.let(::cloudKey).orEmpty()
         relatedReserveTicket++; relatedReservations.clear(); relatedSection?.refreshLabels()
-        if(library.isLoaded) accountHistorySync.resume(library.history())
+        resumeAccountSync()
+    }
+    private fun resumeAccountSync() {
+        if(accountRetired || !accountReady || !accountIntents.isReady() || !library.isLoaded) return
+        accountRepository.captureAccount()?.let { context ->
+            if(accountRepository.isCurrent(context)) { accountIntents.resume(context); accountIntents.syncPending(context) }
+        }
+        accountHistorySync.resume(library.history())
+    }
+    private fun toggleFavorite(series: Series): Boolean? {
+        val context=accountRepository.captureAccount()
+        if(context==null) return library.toggle(series)
+        if(!selectionAllowed(context)) { accountNotReady(); return null }
+        val desired=!library.favorite(series.id)
+        if(accountIntents.setFavorite(context,series,desired)<0) { accountNotReady(); return null }
+        return library.toggle(series)
+    }
+    private fun deleteLocalHistory(ids: Set<String>,all: Boolean=false) {
+        val context=accountRepository.captureAccount()
+        if(context!=null) {
+            if(!selectionAllowed(context)) { accountNotReady(); return }
+            if(accountIntents.deleteHistory(context,ids)<0) { accountNotReady(); return }
+        }
+        if(all) library.clearHistory() else ids.forEach { library.removeHistory(it) }
+        ids.forEach { cloudHistory.remove(it) }
+        if(context!=null && selectionAllowed(context)) accountHistorySync.cancelHistory(context,ids)
+    }
+    private fun openAccountSelection(series: Series,progress: AccountHistoryItem?,kind: String,context: AccountContext) {
+        val revision=accountIntents.historyRevision(context,series.id)
+        if(!selectionAllowed(context)) return
+        if(kind=="history" && !historyAllowed(context,series.id,revision)) return
+        if(kind=="favorites" && accountIntents.suppressFavorite(context,series.id)) return
+        accountReturn=true; accountReturnSection=kind
+        if(progress!=null && historyAllowed(context,series.id,revision)) {
+            if(cloudOwner!=cloudKey(context)) cloudHistory.clear()
+            cloudOwner=cloudKey(context); cloudHistory[series.id]=progress
+        }
+        openDetail(series,resume=progress!=null,capturedSelection=context)
+    }
+    private fun mergeAccountFavorites(items: List<Series>,context: AccountContext,revision: Long) {
+        if(!pullAllowed(context,revision)) return
+        library.mergeCloudFavorites(items.filterNot { accountIntents.suppressFavorite(context,it.id) })
+    }
+    private fun showExpiredSelection(series: Series) {
+        pendingDetail=series
+        invalidatePage(); releaseCatalogViews(); screen="detail"; detail=null
+        val body=base(series.title)
+        expiredSelection(body)
+    }
+    private fun expiredSelection(parent: LinearLayout) {
+        parent.removeAllViews()
+        message(parent,"账号观看记录已变化，请重新从账号页打开该条目。")
+        addButton(parent,"返回账号",onClick={ if(accountReturn) showAccount(accountReturnSection) else showCatalog() }).requestFocus()
     }
     private fun showAccount(section: String?=null,focusSeries: String?=null) {
         invalidatePage(); releaseCatalogViews(); screen="account"; accountReturn=false
         val body=base("红果账号")
         val host=column(); body.addView(host,lp(-1,0).apply { weight=1f })
         val controller=AccountScreen(this,accountRepository,{ title,action -> button(title,onClick=action) },
-            { accountReturn=false; tab=5; showCatalog() },::accountChanged) { series,progress,kind ->
-                accountReturn=true; accountReturnSection=kind
-                if(progress!=null) { cloudOwner=accountRepository.currentSession()?.user?.id.orEmpty(); cloudHistory[series.id]=progress }
-                openDetail(series,resume=progress!=null)
-            }
+            { accountReturn=false; tab=5; showCatalog() },::accountChanged,
+            { _,_,_ -> },intents=accountIntents,openCaptured=::openAccountSelection,mergeFavorites=::mergeAccountFavorites)
         accountScreen=controller; controller.show(host,section,focusSeries)
     }
 
@@ -287,6 +369,12 @@ class MainActivity: Activity() {
         DeviceIdentity.configure(this)
         preloadConfig=preloadPreferences.load()
         AuthStore.restore(this,accountRepository)
+        accountIntents.loadAsync { ready -> main.post {
+            if(!isDestroyed && !accountRetired) {
+                if(ready) { accountReady=true; resumeAccountSync() }
+                else notices.show("账号同步状态读取失败，仅保留本机操作")
+            }
+        } }
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }
         val logical=FrameLayout(this).apply { addView(root,FrameLayout.LayoutParams(-1,-1)) }
@@ -310,7 +398,7 @@ class MainActivity: Activity() {
         library.loadAsync(onFailure={ problem ->
             if(!isDestroyed) { libraryLoadError=problem; if(foreground) showLibraryError(problem) }
         }) {
-            if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check(); accountHistorySync.resume(library.history()) }
+            if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check(); resumeAccountSync() }
         }
     }
     private fun base(title: String?=null): LinearLayout {
@@ -493,7 +581,7 @@ class MainActivity: Activity() {
                 historyManage=addButton(heading,"管理记录") {
                     val rows=library.history()
                     tvTools.choose("选择要管理的观看记录",rows.map { it.series.title },historyManage,{ index -> manageHistory(rows[index].series,historyManage) },"清空记录") {
-                        tvTools.confirm("清空观看记录","将删除本机所有观看进度，收藏会保留。",historyManage) { library.clearHistory(); catalogFocus=""; showCatalog() }
+                        tvTools.confirm("清空观看记录","将删除本机所有观看进度，收藏会保留。",historyManage) { deleteLocalHistory(library.history().map { it.series.id }.toSet(),all=true); catalogFocus=""; showCatalog() }
                     }
                 }.apply { nextFocusUpId=nav[tab].id }
             }
@@ -729,7 +817,7 @@ class MainActivity: Activity() {
         tvTools.choose(series.title,labels,anchor,{ choice ->
             when(choice) {
                 0 -> openDetail(series,true)
-                1 -> { val added=library.toggle(series); notices.show(if(added) "已收藏" else "已取消收藏"); refreshLibraryCards(series.id,!added && (tab==3 || collection=="updates")); if(added) favoriteMonitor.check() }
+                1 -> { val added=toggleFavorite(series); if(added!=null) { notices.show(if(added) "已收藏" else "已取消收藏"); refreshLibraryCards(series.id,!added && (tab==3 || collection=="updates")); if(added) favoriteMonitor.check() } }
                 2 -> { val added=library.toggleLater(series); notices.show(if(added) "已加入稍后看" else "已移出稍后看"); refreshLibraryCards(series.id,!added && collection=="later") }
                 3 -> openDetail(series)
                 4 -> if(tab==4) manageHistory(series,anchor) else { library.hide(series.id); notices.show("已隐藏热门推荐，可在设置中恢复"); refreshLibraryCards(series.id,true) }
@@ -906,42 +994,65 @@ class MainActivity: Activity() {
             when(index) {
                 0 -> openDetail(series,true)
                 1 -> { library.setWatched(series.id,!library.watched(series.id)); catalogFocus=series.id; showCatalog() }
-                2 -> tvTools.confirm("删除观看记录","删除《${series.title}》的本机观看进度？收藏会保留。",anchor) { library.removeHistory(series.id); showCatalog() }
+                2 -> tvTools.confirm("删除观看记录","删除《${series.title}》的本机观看进度？收藏会保留。",anchor) { deleteLocalHistory(setOf(series.id)); showCatalog() }
             }
         })
     }
-    private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true) {
+    private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true,capturedSelection: AccountContext?=accountRepository.captureAccount()) {
         pendingDetail=series; detailAutoplay=autoplay
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
         val body=base(series.title); message(body,"正在加载剧集…")
-        val capturedAccount=accountRepository.currentSession()
-        val chosenHistory=cloudHistory[series.id].takeIf { accountReturn && accountReturnSection=="history" && capturedAccount!=null && cloudOwner==capturedAccount.user.id }
+        val capturedAccount=capturedSelection
+        val localSelection=!accountReturn
+        val historySelection=!localSelection && accountReturnSection=="history"
+        val capturedRevision=capturedAccount?.let { accountIntents.historyRevision(it,series.id) } ?: -1L
+        val capturedGeneration=capturedAccount?.let { accountIntents.revision(it) } ?: -1L
+        if(!localSelection && !selectionAllowed(capturedAccount)) { expiredSelection(body); return }
+        if(historySelection && !historyAllowed(capturedAccount,series.id,capturedRevision)) { expiredSelection(body); return }
+        val chosenHistory=cloudHistory[series.id].takeIf { historySelection && historyAllowed(capturedAccount,series.id,capturedRevision) && cloudOwner==capturedAccount?.let(::cloudKey) }
+        val chosenProgress=chosenHistory?.let { WatchProgress(it.series,it.episodeId,it.episodeIndex,it.position,it.duration,false,it.readAt) }
         playbackAccount=capturedAccount
-        detailLocalSelection=!accountReturn
-        val selectedProgress=chosenHistory?.let { WatchProgress(it.series,it.episodeId,it.episodeIndex,it.position,it.duration,false,it.readAt) } ?: detailProgress(series.id)
-        val needsAccountLookup=!detailLocalSelection && selectedProgress==null && capturedAccount!=null
+        playbackRevision=capturedRevision
+        detailLocalSelection=localSelection
+        val cachedProgress=if(localSelection) detailProgress(series.id) else chosenProgress
+        val needsAccountLookup=!localSelection && chosenProgress==null && historyAllowed(capturedAccount,series.id,capturedRevision) && pullAllowed(capturedAccount,capturedGeneration)
         work({
             // Account-only entries may have no cached progress yet. A failed lookup must
             // remain retryable instead of being mistaken for confirmed absent history.
-            val remote=if(needsAccountLookup) accountRepository.accountVideoProgress(capturedAccount!!)
-                .firstOrNull { it.seriesId==series.id } else null
+            val remote=if(needsAccountLookup) {
+                accountRepository.requireCurrent(capturedAccount!!)
+                accountRepository.accountVideoProgress(capturedAccount.session)
+                    .firstOrNull { it.seriesId==series.id }
+                    .takeIf { historyAllowed(capturedAccount,series.id,capturedRevision) && pullAllowed(capturedAccount,capturedGeneration) }
+            } else null
             repository.detail(series.id) to remote
         }, { loaded ->
             val result=loaded.first
-            loaded.second?.let { row -> if(accountRepository.currentSession()?.user?.id==capturedAccount?.user?.id) {
-                cloudOwner=capturedAccount?.user?.id.orEmpty()
+            if(!localSelection && !selectionAllowed(capturedAccount)) { expiredSelection(body); return@work }
+            val historyUsable=!localSelection && historyAllowed(capturedAccount,series.id,capturedRevision)
+            if(historySelection && !historyUsable) { expiredSelection(body); return@work }
+            val generationUsable=localSelection || pullAllowed(capturedAccount,capturedGeneration)
+            loaded.second?.let { row -> if(historyUsable && generationUsable) {
+                cloudOwner=capturedAccount?.let(::cloudKey).orEmpty()
                 if((cloudHistory[series.id]?.readAt ?: 0L)<=row.readAt) {
                     cloudHistory[series.id]=AccountHistoryItem(series,row.episodeId,row.episodeIndex,row.position,0,row.readAt)
                 }
             } }
-            val progress=selectedProgress ?: detailProgress(series.id)
+            val progress=if(localSelection) cachedProgress ?: library.progress(series.id)
+                else if(historyUsable) {
+                    (chosenProgress.takeIf { generationUsable }) ?: detailProgress(series.id)
+                } else null
             detail=result.copy(series=result.series.copy(bookType=series.bookType.takeIf { it in 2..5 } ?: result.series.bookType))
             library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
             val target=ResumePlayback.resolve(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true,progress?.episodeIndex)
             if(target==null) { episodeIndex=0; group=0; showDetail(false); return@work }
             episodeIndex=target.index; group=episodeIndex/20
             if(resume) playEpisode(target.index,target.position,autoplay=detailAutoplay) else showDetail(false)
-        }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
+        }, { problem ->
+            if(localSelection || (selectionAllowed(capturedAccount) && (!historySelection || historyAllowed(capturedAccount,series.id,capturedRevision))))
+                error(body,problem) { openDetail(series,resume,detailAutoplay,capturedAccount) }
+            else expiredSelection(body)
+        })
     }
     private fun showDetail(focusEpisode: Boolean) {
         invalidatePage(); releaseCatalogViews(); screen="detail"; val data=detail ?: return showCatalog()
@@ -956,18 +1067,29 @@ class MainActivity: Activity() {
         val synopsis=text(description,15f,muted).apply { maxLines=if(synopsisExpanded) 20 else 2; ellipsize=TextUtils.TruncateAt.END }
         info.addView(synopsis)
         val actions=row(); actions.setPadding(0,dp(12),0,0); info.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(actions) },lp(-1,-2))
-        val progress=detailProgress(data.series.id)
+        val historyUsable=detailLocalSelection || playbackHistoryAllowed(data.series.id,playbackRevision)
+        val staleHistorySelection=!detailLocalSelection && accountReturnSection=="history" && !historyUsable
+        val progress=if(historyUsable) detailProgress(data.series.id) else null
         val resumeTarget=ResumePlayback.resolve(data.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true,progress?.episodeIndex)
         val watched=library.watched(data.series.id)
-        if(resumeTarget==null) info.addView(text("原观看记录暂时无法匹配分集，已保留记录。请重试或手动选集。",15f,muted))
-        val play=addButton(actions,if(resumeTarget==null) "重新加载分集" else if(watched) "重新观看" else if(progress!=null && !progress.completed) "继续第 ${resumeTarget.index+1} 集" else "开始观看") {
-            if(resumeTarget==null) openDetail(data.series,resume=true)
-            else playEpisode(if(watched) 0 else resumeTarget.index,if(watched) 0 else resumeTarget.position)
+        if(staleHistorySelection) info.addView(text("账号观看记录已变化，请重新从账号页打开该条目。",15f,muted))
+        else if(!historyUsable) info.addView(text("云端观看记录已删除，可手动选集开始观看。",15f,muted))
+        else if(resumeTarget==null) info.addView(text("原观看记录暂时无法匹配分集，已保留记录。请重试或手动选集。",15f,muted))
+        val play=addButton(actions,if(staleHistorySelection) "返回账号" else if(!historyUsable) "开始观看" else if(resumeTarget==null) "重新加载分集" else if(watched) "重新观看" else if(progress!=null && !progress.completed) "继续第 ${resumeTarget.index+1} 集" else "开始观看") {
+            if(!playbackContextCurrent() || staleHistorySelectionNow(data.series.id)) { showExpiredSelection(data.series); return@addButton }
+            val historyNow=playbackHistoryCurrent(data.series.id)
+            val latest=if(historyNow) detailProgress(data.series.id) else null
+            val target=ResumePlayback.resolve(data.episodes,latest?.episodeId,latest?.position ?: 0,latest?.completed==true,latest?.episodeIndex)
+            val stillWatched=library.watched(data.series.id)
+            if(target==null) {
+                if(historyNow) openDetail(data.series,resume=true,capturedSelection=playbackAccount)
+                else playEpisode(0,0)
+            } else playEpisode(if(stillWatched) 0 else target.index,if(stillWatched) 0 else target.position)
         }
         lateinit var favorite: TextView
         favorite=addButton(actions,if(library.favorite(data.series.id)) "已收藏" else "收藏") {
             favoriteMonitor.stop()
-            val saved=library.toggle(data.series)
+            val saved=toggleFavorite(data.series) ?: return@addButton
             if(saved) library.observeFavorite(data.series.id,data.episodes.size,System.currentTimeMillis(),acknowledge=true)
             favorite.text=if(saved) "已收藏" else "收藏"
         }
@@ -992,7 +1114,17 @@ class MainActivity: Activity() {
         val episodes=mutableListOf<View>()
         (group*20 until minOf((group+1)*20,data.episodes.size)).toList().chunked(5).forEach { numbers ->
             val line=row()
-            numbers.forEach { index -> val done=index in completed; val item=button(EpisodeLabels.label(index+1,done),index==episodeIndex) { playEpisode(index,if(progress?.episodeId==data.episodes[index] && !progress.completed) progress.position else 0) }; item.contentDescription=EpisodeLabels.description(index+1,index==episodeIndex,done); line.addView(item,lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }); episodes+=item }
+            numbers.forEach { index ->
+                val done=index in completed
+                val item=button(EpisodeLabels.label(index+1,done),index==episodeIndex) {
+                    if(!playbackContextCurrent() || staleHistorySelectionNow(data.series.id)) showExpiredSelection(data.series)
+                    else {
+                        val latest=if(playbackHistoryCurrent(data.series.id)) detailProgress(data.series.id) else null
+                        playEpisode(index,latest?.takeIf { it.episodeId==data.episodes[index] && !it.completed }?.position ?: 0)
+                    }
+                }
+                item.contentDescription=EpisodeLabels.description(index+1,index==episodeIndex,done); line.addView(item,lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }); episodes+=item
+            }
             repeat(5-numbers.size) { line.addView(Space(this),lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }) }
             content.addView(line,lp(-1,dp(49)))
         }
@@ -1011,16 +1143,19 @@ class MainActivity: Activity() {
             if(ticket==relatedLoadTicket && detail?.series?.id==data.series.id && relatedSection===section)
                 section.show(RelatedWorks.ordered(data.series,rows))
         }, { if(ticket==relatedLoadTicket && detail?.series?.id==data.series.id && relatedSection===section) section.failed() })
-        if(accountRepository.currentSession()!=null) loadReservations() else relatedReservations.clear()
+        if(accountRepository.captureAccount()!=null) loadReservations() else relatedReservations.clear()
     }
     private fun loadReservations() {
         val ticket=++relatedReserveTicket
-        val session=accountRepository.currentSession() ?: run { relatedReservations.clear(); return }
+        val context=accountRepository.captureAccount() ?: run { relatedReservations.clear(); return }
         io.submit {
-            val rows=runCatching { accountRepository.accountReservations().reservations }.getOrDefault(emptyList())
+            val rows=runCatching {
+                accountRepository.requireCurrent(context)
+                accountRepository.accountReservations().reservations
+            }.getOrDefault(emptyList())
             main.post {
-                if(isDestroyed || ticket!=relatedReserveTicket) return@post
-                if(accountRepository.currentSession()?.user?.id!=session.user.id) return@post
+                if(isDestroyed || ticket!=relatedReserveTicket || !selectionAllowed(context)) return@post
+                if(runCatching { accountRepository.requireCurrent(context) }.isFailure) return@post
                 relatedReservations.clear(); rows.forEach { relatedReservations[it.series.id]=it }
                 relatedSection?.refreshLabels()
             }
@@ -1030,20 +1165,24 @@ class MainActivity: Activity() {
         if(relatedReservations[work.series.id]?.subscribed==true) "已预约 · 取消预约" else "待上线 · 预约"
     private fun openRelated(work: RelatedWork,anchor: View) {
         if(!work.upcoming) { openDetail(work.series); return }
-        val session=accountRepository.currentSession() ?: run {
+        val context=accountRepository.captureAccount() ?: run {
             tvTools.info("预约需要登录","请先在设置中登录红果账号后再预约。",anchor); return
         }
+        val ticket=relatedReserveTicket
         val current=relatedReservations[work.series.id]
         val active=current?.subscribed!=true
         val itemType=current?.itemType ?: 14
         anchor.isEnabled=false
         io.submit {
-            val ok=runCatching { accountRepository.setReservation(work.series.id,active,itemType) }.getOrDefault(false)
+            val ok=runCatching {
+                accountRepository.requireCurrent(context)
+                accountRepository.setReservation(work.series.id,active,itemType)
+            }.getOrDefault(false)
             main.post {
                 if(isDestroyed) return@post
                 if(anchor.isAttachedToWindow) anchor.isEnabled=true
                 if(!ok) { notices.show("预约操作失败，请稍后重试",1); return@post }
-                if(accountRepository.currentSession()?.user?.id!=session.user.id) return@post
+                if(ticket!=relatedReserveTicket || !selectionAllowed(context) || runCatching { accountRepository.requireCurrent(context) }.isFailure) return@post
                 if(current==null) relatedReservations[work.series.id]=AccountReservation(work.series,itemType=itemType,subscribed=active)
                 else relatedReservations[work.series.id]=current.copy(subscribed=active)
                 relatedSection?.refreshLabels()
@@ -1710,13 +1849,29 @@ class MainActivity: Activity() {
         // The paused identical-checkpoint optimization must not drop a completion mark that preferences lack.
         if(identical && !mark) return
         library.save(progress)
-        if(identical) return
-        accountOwners.edit().putString(data.series.id,playbackAccount?.user?.id.orEmpty()).apply()
-        accountHistorySync.offer(progress,data.series.bookType,data.episodes.size,playbackAccount)
-        playbackAccount?.let { session -> if(accountRepository.currentSession()?.user?.id==session.user.id) {
-            cloudOwner=session.user.id
-            cloudHistory[data.series.id]=AccountHistoryItem(data.series,progress.episodeId,progress.episodeIndex,progress.position,progress.duration,progress.updatedAt)
-        } }
+        if(identical || library.progress(data.series.id)!=progress) return
+        if(accountRetired) return
+        val original=playbackAccount
+        if(original==null) {
+            accountOwners.edit().remove(data.series.id).apply()
+            accountHistorySync.offer(progress,data.series.bookType,data.episodes.size,null,0L)
+            return
+        }
+        if(!accountRepository.isCurrent(original)) { accountOwners.edit().remove(data.series.id).apply(); return }
+        val context=accountRepository.captureAccount() ?: return
+        if(!accountRepository.isCurrent(original) || !accountRepository.isCurrent(context)) return
+        if(!selectionAllowed(context)) {
+            accountOwners.edit().putString(data.series.id,context.owner ?: "epoch:${context.credentialOwner}:${context.epoch}").apply()
+            return
+        }
+        val revision=accountIntents.rewatch(context,data.series.id)
+        if(revision<0 || !accountRepository.isCurrent(original) || !historyAllowed(context,data.series.id,revision)) return
+        playbackRevision=revision
+        accountOwners.edit().putString(data.series.id,context.owner ?: "epoch:${context.credentialOwner}:${context.epoch}").apply()
+        accountHistorySync.offer(progress,data.series.bookType,data.episodes.size,context,revision)
+        if(cloudOwner!=cloudKey(context)) cloudHistory.clear()
+        cloudOwner=cloudKey(context)
+        cloudHistory[data.series.id]=AccountHistoryItem(data.series,progress.episodeId,progress.episodeIndex,progress.position,progress.duration,progress.updatedAt)
 
     }
     private fun releasePlayer(keepUpcoming: Boolean=false) {
@@ -1809,7 +1964,7 @@ class MainActivity: Activity() {
                 restoreStoppedPage=false
                 when(screen) {
                     "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
-                    "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false) } ?: showCatalog()
+                    "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false,capturedSelection=playbackAccount) } ?: showCatalog()
                     "account" -> showAccount()
                     else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab==0 || tab==2 || (tab==1 && query.isNotBlank())))
                 }
@@ -1818,7 +1973,7 @@ class MainActivity: Activity() {
             }
             if(screen=="catalog") favoriteMonitor.check()
             if(screen=="player") syncMediaSession()
-            accountHistorySync.resume(library.history())
+            resumeAccountSync()
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
@@ -1843,7 +1998,8 @@ class MainActivity: Activity() {
         if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) cancelPrefetch()
     }
     override fun onDestroy() {
-        accountScreen?.destroy(); accountScreen=null; accountHistorySync.close()
+        accountRetired=true
+        accountScreen?.destroy(); accountScreen=null; accountHistorySync.close(); accountIntents.close()
         generation++; cancelWork()
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()

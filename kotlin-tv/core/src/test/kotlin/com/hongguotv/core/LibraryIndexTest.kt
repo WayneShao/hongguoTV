@@ -88,4 +88,13 @@ class LibraryIndexTest {
         assertTrue(state.history().isEmpty())
         assertEquals(0, state.updatedFavorites())
     }
+    @Test fun `passive cloud favorites preserve local order capacity and never toggle existing rows`() {
+        val state=LibraryIndex(data()); val original=state.favorites()
+        assertFalse(state.mergeCloudFavorites(listOf(series(500),series(501))))
+        assertSame(original,state.favorites()); assertFalse(state.favorite("501"))
+        state.toggle(series(1))
+        assertTrue(state.mergeCloudFavorites(listOf(series(500),series(501),series(501))))
+        assertEquals("501",state.favorites().last().id); assertEquals(500,state.favorites().size)
+        assertTrue(state.favorite("500"))
+    }
 }

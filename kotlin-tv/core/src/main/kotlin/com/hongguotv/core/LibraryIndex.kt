@@ -82,6 +82,14 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
         updateCount = updateRows.values.count { it.added > 0 }
         return added
     }
+    /** Passive cloud ingress adds missing rows only; local order and capacity win. */
+    fun mergeCloudFavorites(items: List<Series>): Boolean {
+        val additions=items.distinctBy { it.id }.filterNot { it.id in favoriteIds }.take((500-favoriteRows.size).coerceAtLeast(0))
+        if(additions.isEmpty()) return false
+        favoriteRows=favoriteRows+additions
+        favoriteIds=favoriteRows.map { it.id }.toSet()
+        return true
+    }
     fun toggleLater(series: Series): Boolean {
         val added = !queued(series.id)
         laterRows = (if (added) listOf(series) + laterRows else laterRows.filterNot { it.id == series.id }).take(100)
