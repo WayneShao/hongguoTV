@@ -129,6 +129,15 @@ class Library(context: Context) {
     fun mergeCloudFavorites(items: List<Series>) { if(state().mergeCloudFavorites(items)) persist("favorites") }
     fun toggleLater(series: Series) = state().toggleLater(series).also { persist("later") }
     fun save(progress: WatchProgress) { if (state().save(progress)) persist("progress", "completedEpisodes") }
+    /** Applies a catalog-validated merge winner; this requests persistence, not a disk acknowledgement. */
+    fun mergeProgress(progress: WatchProgress): Boolean {
+        if(closed || !isLoaded) return false
+        val state=state()
+        val saved=state.save(progress)
+        val resumed=if(!progress.completed) state.setWatched(progress.series.id,false) else false
+        if(saved || resumed) persist("progress","completedEpisodes","watched")
+        return saved || resumed
+    }
     fun setWatched(id: String, value: Boolean) { if (state().setWatched(id, value)) persist("watched") }
     fun hide(id: String) { state().hide(id); persist("hidden") }
     fun unhideAll() { state().unhideAll(); persist("hidden") }

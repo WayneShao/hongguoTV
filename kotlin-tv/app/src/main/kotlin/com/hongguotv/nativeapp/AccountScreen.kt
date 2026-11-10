@@ -27,6 +27,7 @@ internal class AccountScreen(
     private val intents: AccountIntents? = null,
     private val openCaptured: ((Series, AccountHistoryItem?, String, AccountContext) -> Unit)? = null,
     private val mergeFavorites: ((List<Series>, AccountContext, Long) -> Unit)? = null,
+    private val mergeProgress: ((AccountContext, (String) -> Unit) -> Boolean)? = null,
 ) {
     private val main=Handler(Looper.getMainLooper())
     private val worker=Executors.newSingleThreadExecutor()
@@ -89,7 +90,8 @@ internal class AccountScreen(
                 if(!repository.isCurrent(context)) return@action
                 repository.logout(); AuthStore.clear(activity); changed(); render()
             }
-            body.addView(label("本机收藏和历史保留。登录前的访客记录不会批量上传。",13f))
+            body.addView(label("本机收藏和历史保留。登录不会自动上传访客记录；手动合并观看进度时可纳入本机访客记录。",13f))
+            if(mergeProgress!=null) mergeAction(body,context)
             if(intents!=null) {
                 action(body,"刷新收藏同步状态") {
                     if(repository.isCurrent(context)) intents.resume(context)
@@ -101,6 +103,29 @@ internal class AccountScreen(
         }
     }
     private fun generation(context: AccountContext)=intents?.revision(context) ?: 0L
+    private fun mergeAction(body: LinearLayout,context: AccountContext) {
+        body.addView(label("按观看进度合并，本地领先时上报云端",13f))
+        val result=label("",13f)
+        val ticket=revision
+        var busy=false
+        lateinit var control: View
+        control=action(body,"合并观看进度") {
+            if(busy || parent==null || page!="home" || ticket!=revision || !repository.isCurrent(context)) return@action
+            val capturedGeneration=generation(context)
+            if(!current(context,capturedGeneration)) return@action
+            busy=true; control.isEnabled=false; result.text="正在合并观看进度…"
+            val started=mergeProgress?.invoke(context) { message ->
+                main.post {
+                    if(parent!=null && !activity.isDestroyed && ticket==revision && page=="home" && repository.isCurrent(context)) {
+                        busy=false; control.isEnabled=true
+                        result.text=if(current(context,capturedGeneration)) message else "同步状态已变化，请重新合并。"
+                    }
+                }
+            }==true
+            if(!started) { busy=false; control.isEnabled=true; result.text="暂时无法合并，请等待账号和本机记录就绪后重试。" }
+        }
+        body.addView(result)
+    }
     private fun current(context: AccountContext,expectedRevision: Long)=repository.isCurrent(context) &&
         expectedRevision>=0 && generation(context)==expectedRevision
     private fun detachIntents() {
