@@ -11,7 +11,7 @@ data class BackupProgress(val series: Series,val episodeId: String,val episodeIn
 data class BackupSettings(val quality: Int=PlaybackQuality.DEFAULT,val speed: Float=1f,val autoNext: Boolean=true,val type: ContentType=ContentType.COMIC,val frame: VideoFrameMode=VideoFrameMode.FIT,val seasonAutoplay: Boolean=false) {
     fun json()=JSONObject().put("quality",quality).put("speed",speed.toDouble()).put("autoNext",autoNext).put("type",type.storedValue).put("frame",frame.name).put("seasonAutoplay",seasonAutoplay)
 }
-data class BackupData(val favorites: List<Series>,val history: List<BackupProgress>,val watched: Set<String>,val searches: List<RecentSearch>,val settings: BackupSettings,val later: List<Series> = emptyList(),val hidden: Set<String> = emptySet())
+data class BackupData(val favorites: List<Series>,val history: List<BackupProgress>,val watched: Set<String>,val searches: List<RecentSearch>,val settings: BackupSettings,val later: List<Series> = emptyList(),val hidden: Set<String> = emptySet(),val completed: Map<String, Set<String>> = emptyMap())
 
 object LibraryBackup {
     const val MAX_BYTES=2*1024*1024
@@ -28,9 +28,15 @@ object LibraryBackup {
             .put("later",JSONArray(data.later.map(::seriesJson))).put("hidden",JSONArray(data.hidden.toList()))
             .put("favorites",JSONArray(data.favorites.map(::seriesJson))).put("history",JSONArray(data.history.map { it.json() }))
             .put("watched",JSONArray(data.watched.intersect((data.favorites.map { it.id }+data.history.map { it.series.id }).toSet()).take(500)))
-            .put("searches",JSONArray(SearchHistory.encode(data.searches.map { it.copy(query=cleanText(it.query,80)) }))).put("settings",data.settings.json()).toString()
-        require(result.toByteArray(Charsets.UTF_8).size<=MAX_BYTES) { "备份超过 2 MB 限制" }
-        return result
+            .put("searches",JSONArray(SearchHistory.encode(data.searches.map { it.copy(query=cleanText(it.query,80)) }))).put("settings",data.settings.json())
+        val completed=CompletionHistory.prune(data.history.sortedByDescending { it.updatedAt },data.completed)
+        if(completed.isNotEmpty()) result.put("completedEpisodes",completionJson(completed))
+        val text=result.toString()
+        require(text.toByteArray(Charsets.UTF_8).size<=MAX_BYTES) { "备份超过 2 MB 限制" }
+        return text
+    }
+    private fun completionJson(rows: Map<String, Set<String>>)=JSONObject().also { result ->
+        rows.forEach { (id,ids) -> result.put(id,JSONArray(ids.sorted())) }
     }
     private fun JSONObject.number(key: String,max: Long): Long {
         val value=get(key); require(value is Number) { "数值字段无效" }
@@ -77,7 +83,28 @@ object LibraryBackup {
         val type=ContentType.entries.firstOrNull { it.storedValue==settings.getString("type") } ?: error("内容类型无效")
         val frame=VideoFrameMode.entries.firstOrNull { it.name==settings.getString("frame") } ?: error("画面模式无效")
         val seasonAutoplay=settings.optBoolean("seasonAutoplay",false)
-        return BackupData(favorites,history,watchedIds,searches,BackupSettings(quality,speed.toFloat(),autoNext,type,frame,seasonAutoplay),later,hiddenIds)
+        val completed=if(o.has("completedEpisodes")) {
+            val rows=o.opt("completedEpisodes")
+            require(rows is JSONObject) { "已看完剧集字段无效" }
+            require(rows.length()<=CompletionHistory.MAX_SERIES) { "已看完剧集数量超过上限" }
+            var total=0
+            rows.keys().asSequence().associate { rawSeriesId ->
+                val seriesId=id(rawSeriesId)
+                val array=rows.optJSONArray(rawSeriesId)
+                require(array!=null) { "已看完剧集字段无效" }
+                require(array.length()<=CompletionHistory.MAX_IDS_PER_SERIES) { "单剧已看完集数超过上限" }
+                val ids=(0 until array.length()).map { index ->
+                    val raw=array.opt(index)
+                    require(raw is String) { "已看完集数标识无效" }
+                    id(raw)
+                }.toSet()
+                total+=ids.size
+                require(total<=CompletionHistory.MAX_IDS_TOTAL) { "已看完集数超过上限" }
+                seriesId to ids
+            }.filterValues { it.isNotEmpty() }
+        } else emptyMap()
+        return BackupData(favorites,history,watchedIds,searches,BackupSettings(quality,speed.toFloat(),autoNext,type,frame,seasonAutoplay),later,hiddenIds,
+            CompletionHistory.prune(history,completed))
     }
     /** Existing favorites stay first; only newer imported progress replaces a local record. */
     fun merge(local: BackupData,incoming: BackupData,restoreSettings: Boolean): BackupData {
@@ -94,6 +121,13 @@ object LibraryBackup {
         incoming.watched.filter { id -> id !in records && local.favorites.none { it.id==id } }.forEach { watched.add(it) }
         val history=records.values.sortedByDescending { it.updatedAt }.take(200)
         val retained=(favorites.map { it.id }+history.map { it.series.id }).toSet()
-        return BackupData(favorites,history,watched.intersect(retained).take(500).toSet(),(local.searches+incoming.searches).distinct().take(20),if(restoreSettings) incoming.settings else local.settings,(local.later+incoming.later).distinctBy { it.id }.take(100),(local.hidden+incoming.hidden).take(500).toSet())
+        val completed=linkedMapOf<String, Set<String>>()
+        history.forEach { row ->
+            val id=row.series.id
+            val ids=local.completed[id].orEmpty()+incoming.completed[id].orEmpty()
+            if(ids.isNotEmpty()) completed[id]=ids
+        }
+        return BackupData(favorites,history,watched.intersect(retained).take(500).toSet(),(local.searches+incoming.searches).distinct().take(20),if(restoreSettings) incoming.settings else local.settings,(local.later+incoming.later).distinctBy { it.id }.take(100),(local.hidden+incoming.hidden).take(500).toSet(),
+            CompletionHistory.prune(history,completed))
     }
 }

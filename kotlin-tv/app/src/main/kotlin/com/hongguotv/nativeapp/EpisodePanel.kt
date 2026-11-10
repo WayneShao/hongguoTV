@@ -11,11 +11,21 @@ import android.view.View
 import android.view.Window
 import android.widget.*
 
+/** Compact episode labels shared by the detail grid and the side panel. */
+object EpisodeLabels {
+    fun label(number: Int,completed: Boolean)=if(completed) "$number✓" else "$number"
+    fun description(number: Int,current: Boolean,completed: Boolean)="第 $number 集"+(if(current) "，当前播放" else "")+(if(completed) "，已看完" else "")
+    fun summary(count: Int,total: Int)="已看完 $count / $total 集"
+    fun indexes(episodes: List<String>,completed: Set<String>)=episodes.withIndex().filter { it.value in completed }.mapTo(mutableSetOf()) { it.index }
+    fun count(episodes: List<String>,completed: Set<String>)=episodes.count { it in completed }
+}
+
 /** A remote-accessible side panel; selecting a number is the only action that changes episodes. */
 class EpisodePanel(
     private val activity: Activity,private val count: Int,private val current: Int,
     private val locate: (Int,View,(Int)->Unit)->Unit,
-    private val select: (Int)->Unit,private val closed: ()->Unit
+    private val select: (Int)->Unit,private val closed: ()->Unit,
+    private val completed: Set<Int> = emptySet()
 ) {
     private val dialog=RayNeoDialogs.ContentDialog(activity)
     private var group=current/20
@@ -49,14 +59,16 @@ class EpisodePanel(
         listOf(previous,next).forEach { paging.addView(it,LinearLayout.LayoutParams(0,-2,1f).apply { setMargins(dp(3),dp(3),dp(3),dp(3)) }) }
         content.addView(paging)
         content.addView(label("第 ${group*20+1}—${minOf((group+1)*20,count)} 集 / 共 $count 集",14f))
+        content.addView(label(EpisodeLabels.summary(completed.size,count),14f))
         val scroll=ScrollView(activity); val grid=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL }; scroll.addView(grid)
         content.addView(scroll,LinearLayout.LayoutParams(-1,0,1f))
         val cells=mutableListOf<TextView>()
         (group*20 until minOf((group+1)*20,count)).toList().chunked(5).forEach { indexes ->
             val row=LinearLayout(activity)
             indexes.forEach { index ->
-                val cell=button("${index+1}",index==current) { select(index) }
-                cell.contentDescription="第 ${index+1} 集"+(if(index==current) "，当前播放" else "")
+                val done=index in completed
+                val cell=button(EpisodeLabels.label(index+1,done),index==current) { select(index) }
+                cell.contentDescription=EpisodeLabels.description(index+1,index==current,done)
                 row.addView(cell,LinearLayout.LayoutParams(0,-2,1f).apply { setMargins(dp(3),dp(3),dp(3),dp(3)) }); cells+=cell
             }
             repeat(5-indexes.size) { row.addView(Space(activity),LinearLayout.LayoutParams(0,1,1f)) }

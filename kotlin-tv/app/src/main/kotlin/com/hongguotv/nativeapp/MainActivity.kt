@@ -987,10 +987,12 @@ class MainActivity: Activity() {
         lateinit var jump: TextView
         jump=addButton(groupRow,"跳转集数") { tvTools.episodePicker(data.episodes.size,episodeIndex,jump) { target -> episodeIndex=target; group=target/20; showDetail(true) } }
         content.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(groupRow) },lp(-1,-2))
+        val completed=EpisodeLabels.indexes(data.episodes,library.completed(data.series.id))
+        content.addView(text(EpisodeLabels.summary(completed.size,data.episodes.size),14f,muted).apply { setPadding(0,dp(6),0,dp(2)) })
         val episodes=mutableListOf<View>()
         (group*20 until minOf((group+1)*20,data.episodes.size)).toList().chunked(5).forEach { numbers ->
             val line=row()
-            numbers.forEach { index -> val item=button("${index+1}",index==episodeIndex) { playEpisode(index,if(progress?.episodeId==data.episodes[index] && !progress.completed) progress.position else 0) }; item.contentDescription="第 ${index+1} 集"; line.addView(item,lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }); episodes+=item }
+            numbers.forEach { index -> val done=index in completed; val item=button(EpisodeLabels.label(index+1,done),index==episodeIndex) { playEpisode(index,if(progress?.episodeId==data.episodes[index] && !progress.completed) progress.position else 0) }; item.contentDescription=EpisodeLabels.description(index+1,index==episodeIndex,done); line.addView(item,lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }); episodes+=item }
             repeat(5-numbers.size) { line.addView(Space(this),lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }) }
             content.addView(line,lp(-1,dp(49)))
         }
@@ -1675,6 +1677,7 @@ class MainActivity: Activity() {
         requestedAutoplay=player?.playWhenReady ?: requestedAutoplay
         player?.pause(); saveProgress()
         var resumeOnClose=true
+        val completed=EpisodeLabels.indexes(data.episodes,library.completed(data.series.id))
         val next=EpisodePanel(this,data.episodes.size,episodeIndex,
             { current,view,located -> tvTools.episodePicker(data.episodes.size,current,view,located) },
             { selected ->
@@ -1688,7 +1691,7 @@ class MainActivity: Activity() {
                     if(anchor.isAttachedToWindow) anchor.requestFocus()
                     if(overlayWasVisible) showHud() else hidePlaybackOverlay()
                 }
-            })
+            },completed)
         episodePanel=next; next.show()
     }
     private fun hidePanel() { if(playError) return; panel=false; controls.visibility=View.GONE; controls.clearFocus(); showHud() }
@@ -1702,8 +1705,12 @@ class MainActivity: Activity() {
         val data=detail ?: return; if(index !in data.episodes.indices) return
         val progress=WatchProgress(data.series,data.episodes[index],index,position.coerceAtLeast(0),duration.coerceAtLeast(0),completed,System.currentTimeMillis())
         val previous=library.progress(data.series.id)
-        if(previous!=null && previous.copy(updatedAt=progress.updatedAt)==progress) return
+        val identical=previous!=null && previous.copy(updatedAt=progress.updatedAt)==progress
+        val mark=completed && !library.completed(data.series.id,progress.episodeId)
+        // The paused identical-checkpoint optimization must not drop a completion mark that preferences lack.
+        if(identical && !mark) return
         library.save(progress)
+        if(identical) return
         accountOwners.edit().putString(data.series.id,playbackAccount?.user?.id.orEmpty()).apply()
         accountHistorySync.offer(progress,data.series.bookType,data.episodes.size,playbackAccount)
         playbackAccount?.let { session -> if(accountRepository.currentSession()?.user?.id==session.user.id) {

@@ -97,6 +97,7 @@ class Library(context: Context) {
                 "favorites" -> state.favorites().let { rows -> { LibraryDisk.series(rows) } }
                 "later" -> state.later().let { rows -> { LibraryDisk.series(rows) } }
                 "progress" -> state.history().let { rows -> { LibraryDisk.history(rows) } }
+                "completedEpisodes" -> state.completedAll().let { rows -> { LibraryDisk.completed(rows) } }
                 "favoriteUpdates" -> state.updates().let { rows -> { LibraryDisk.updates(rows) } }
                 "searches" -> state.searches().let { rows -> { SearchHistory.encode(rows) } }
                 "watched" -> state.watched().let { ids -> { ids } }
@@ -112,6 +113,10 @@ class Library(context: Context) {
     fun queued(id: String) = state().queued(id)
     fun history(): List<WatchProgress> = state().history()
     fun progress(id: String): WatchProgress? = state().progress(id)
+    fun completed(id: String): Set<String> = state().completed(id)
+    fun completed(id: String, episodeId: String) = state().completed(id, episodeId)
+    fun completedAll(): Map<String, Set<String>> = state().completedAll()
+    fun completedCount(id: String, episodeIds: List<String>) = state().completedCount(id, episodeIds)
     fun searches() = state().searches()
     fun watched(id: String) = state().watched(id)
     fun hidden() = state().hidden()
@@ -122,14 +127,14 @@ class Library(context: Context) {
     } ?: "尚未检查更新"
     fun toggle(series: Series) = state().toggle(series).also { persist("favorites", "favoriteUpdates") }
     fun toggleLater(series: Series) = state().toggleLater(series).also { persist("later") }
-    fun save(progress: WatchProgress) { if (state().save(progress)) persist("progress") }
+    fun save(progress: WatchProgress) { if (state().save(progress)) persist("progress", "completedEpisodes") }
     fun setWatched(id: String, value: Boolean) { if (state().setWatched(id, value)) persist("watched") }
     fun hide(id: String) { state().hide(id); persist("hidden") }
     fun unhideAll() { state().unhideAll(); persist("hidden") }
     fun rememberSearch(query: String, type: ContentType) { state().rememberSearch(query, type); persist("searches") }
     fun clearSearches() { state().clearSearches(); persist("searches") }
-    fun removeHistory(id: String) { state().removeHistory(id); persist("progress", "watched") }
-    fun clearHistory() { state().clearHistory(); persist("progress", "watched") }
+    fun removeHistory(id: String) { state().removeHistory(id); persist("progress", "watched", "completedEpisodes") }
+    fun clearHistory() { state().clearHistory(); persist("progress", "watched", "completedEpisodes") }
     fun observeFavorite(id: String, count: Int, now: Long, acknowledge: Boolean = false) {
         if (state().observeFavorite(id, count, now, acknowledge)) persist("favoriteUpdates")
     }
@@ -169,7 +174,7 @@ class Library(context: Context) {
     fun restore(incoming: BackupData, restoreSettings: Boolean) {
         val merged = LibraryBackup.merge(snapshot(), incoming, restoreSettings)
         index = LibraryIndex(merged, state().updates())
-        persist("favorites", "later", "progress", "watched", "hidden", "searches", "favoriteUpdates")
+        persist("favorites", "later", "progress", "watched", "hidden", "searches", "favoriteUpdates", "completedEpisodes")
         writes.submit(mapOf("quality" to { merged.settings.quality }, "playbackSpeed" to { merged.settings.speed },
             "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name },
             "seasonAutoplay" to { merged.settings.seasonAutoplay }))
