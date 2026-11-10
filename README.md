@@ -8,6 +8,8 @@
 
 原生工程位于 `kotlin-tv/`，包名 `com.hongguotv.nativeapp`，可与旧版并存。以下为保留的 React Native 版说明。
 
+当前维护分支支持红果扫码登录，并增加[手动合并观看进度](docs/MANUAL_PROGRESS_MERGE.md)：云端领先时更新本机，本地领先时保留并上报。该源码功能是否已发布，以对应版本的发布记录为准。
+
 ---
 
 用于自家电视的非官方红果短剧客户端。首版采用 **React Native TV + TypeScript**，最低 Android 8.0（API 26）。电视负责界面和播放，独立 Node 服务负责内容接入与媒体分段处理，便于后续其他平台复用。
