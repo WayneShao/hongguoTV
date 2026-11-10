@@ -105,6 +105,7 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
     private val site="https://hongguoduanju.com"
     fun detail(id: String)=content.detail(id)
     private val authLock=Any()
+    private var authEpoch=0L
     private val authCookies=linkedMapOf<String,String>()
     @Volatile private var authToken=""
     @Volatile private var authUser: AuthUser?=null
@@ -183,18 +184,32 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
     }
     fun restoreSession(session: AuthSession?) {
         synchronized(authLock) {
+            val previous=authUser
+            val changed=previous?.id!=session?.user?.id || authToken!=session?.token.orEmpty() || authCookies!=session?.cookies.orEmpty()
+            val oldId=previous?.accountId?.let(::canonicalAccountId)
+            val newId=session?.user?.accountId?.let(::canonicalAccountId)
+            if(changed || (oldId!=null && newId!=null && oldId!=newId)) authEpoch++
             authCookies.clear()
             if(session==null) {
                 authToken=""; authUser=null
             } else {
                 authCookies.putAll(session.cookies)
-                authToken=session.token; authUser=session.user
+                authToken=session.token; authUser=if(newId==null && oldId!=null && !changed) session.user.copy(accountId=oldId) else session.user
             }
         }
     }
     fun currentSession(): AuthSession? = synchronized(authLock) {
         authUser?.let { AuthSession(authCookies.toMap(),authToken,it) }
     }
+    fun captureAccount(): AccountContext? = synchronized(authLock) {
+        val session=currentSession() ?: return@synchronized null
+        AccountContext(session,authEpoch,canonicalAccountId(session.user.accountId)?.let { accountHash("account:$it") },
+            accountHash(session.user.id),credentialOwner(session))
+    }
+    fun isCurrent(context: AccountContext): Boolean = synchronized(authLock) {
+        authEpoch==context.epoch && authUser?.id==context.session.user.id && authToken==context.session.token && authCookies==context.session.cookies
+    }
+    fun requireCurrent(context: AccountContext) { if(!isCurrent(context)) throw IOException("登录账号已变化，停止同步") }
     fun logout() { cancelLoginQr(); restoreSession(null) }
     /**
      * 获取红果网页扫码登录二维码。网页接口只返回 PNG data URI 和一次性 token；
@@ -242,17 +257,21 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
             val cookies=session.store.snapshot()
             if(!hasLoginCookie(cookies)) throw IOException("登录状态未返回，请刷新二维码重试")
             if(synchronized(qrLock) { qrSession!==session }) throw IOException("二维码已失效，请刷新")
-            val auth=synchronized(qrLock) {
+            val installed=synchronized(qrLock) {
                 if(qrSession!==session) throw IOException("二维码已失效，请刷新")
                 // Install session only while this QR still belongs to the active window.
                 val id=qrUserId(cookies)
-                restoreSession(AuthSession(cookies,token,AuthUser(id,"")))
-                qrSession=null
-                currentSession() ?: throw IOException("登录状态保存失败")
+                synchronized(authLock) {
+                    restoreSession(AuthSession(cookies,token,AuthUser(id,"")))
+                    qrSession=null
+                    captureAccount() ?: throw IOException("登录状态保存失败")
+                }
             }
-            val resolved=runCatching { refreshUser() }.getOrElse {
-                if(authExpired(it)) { restoreSession(null); throw it }; auth
+            val resolved=runCatching { refreshUser(installed) }.getOrElse {
+                requireCurrent(installed)
+                if(authExpired(it)) { synchronized(authLock) { requireCurrent(installed); restoreSession(null) }; throw it }; installed.session
             }
+            requireCurrent(installed)
             return LoginQrPoll(LoginQrStatus.CONFIRMED,resolved)
         }
         if(status==LoginQrStatus.EXPIRED) {
@@ -263,18 +282,21 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
     }
     fun cancelLoginQr() = synchronized(qrLock) { qrGeneration++; qrSession=null }
     /** 用已登录会话刷新昵称/头像；失败时保留原资料，由界面提示重新登录。 */
-    fun refreshUser(): AuthSession {
-        val current=currentSession() ?: throw IOException("请先登录")
+    fun refreshUser(): AuthSession = refreshUser(captureAccount() ?: throw IOException("请先登录"))
+    fun refreshUser(captured: AccountContext): AuthSession {
+        requireCurrent(captured)
+        val current=captured.session
         val signed=signer.sign(USER_INFO_API,recentOfficialValues().also {
             it["check_idfa"]="false"; it["not_need_perm"]="false"; it["is_bind_douyin"]="false"
             it["enable_preference_v709"]="false"; it["code"]="0"; it["need_perm_from_master"]="false"
         })
         val root=runCatching { JSONObject(text(signed.url,signed,mapOf("Cookie" to cookieHeader(current.cookies),"X-Tt-Token" to current.token))) }.getOrElse { throw IOException("账号资料返回异常") }
+        requireCurrent(captured)
         if(root.optInt("code",-1)!=0) throw IOException(authError(root))
         val data=root.optJSONObject("data") ?: throw IOException("账号资料为空")
         ensureHistorySession(current)
         val accountId=listOf(data.str("req_id"),data.str("biz_user_id"),data.str("user_id"))
-            .firstOrNull { it.matches(Regex("[0-9]{1,30}")) }.orEmpty()
+            .firstOrNull { canonicalAccountId(it)!=null }.orEmpty()
         val user=current.user.copy(
             name=data.str("user_name").ifEmpty { current.user.name },
             avatar=cleanUrl(data.str("expand_avatar_url").ifEmpty { data.str("avatar_url") }).ifEmpty { current.user.avatar },
@@ -283,11 +305,10 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
             accountId=accountId.ifEmpty { current.user.accountId }
         )
         synchronized(authLock) {
-            if (authUser?.id != current.user.id || authToken != current.token || authCookies != current.cookies)
-                throw IOException("登录账号已变化")
-            authUser=user
+            requireCurrent(captured)
+            restoreSession(current.copy(user=user))
+            return current.copy(user=user,cookies=java.util.Collections.unmodifiableMap(LinkedHashMap(current.cookies)))
         }
-        return currentSession() ?: throw IOException("账号资料为空")
     }
     /** 账号接口统一要求 `lc` 头；签名仍由 [Signer] 负责。 */
     private fun accountHeaders() = mapOf("lc" to "101","x-ss-dp" to "8662")
@@ -481,7 +502,12 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
     }
     /** 账号收藏：短剧收藏在 `bookshelf/video/list/v` 的 `video_shelf_info` 中。 */
     fun accountFavorites(): AccountPage {
-        val session=currentSession() ?: throw IOException("请先登录")
+        return accountFavorites(captureAccount() ?: throw IOException("请先登录"))
+    }
+    fun accountFavorites(context: AccountContext): AccountPage {
+        requireCurrent(context)
+        if(context.owner==null) throw AccountProfileUnavailableException()
+        val session=context.session
         val userId=session.user.accountId
         if(userId.isBlank()) throw AccountProfileUnavailableException()
         val values=recentOfficialValues().also { map ->
@@ -489,10 +515,76 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
             map["target_user_id"]=userId
         }
         val root=accountJson(FAVORITES_API,values,session)
+        requireCurrent(context)
         val data=root.optJSONObject("data") ?: return AccountPage(emptyList())
         val items=accountRows(data,"video_shelf_info","video_shelf","book_list","data_list","books")
             .mapNotNull(::accountShelfItem).distinctBy { it.id }
         return AccountPage(items)
+    }
+    private val favoriteHttp by lazy { http.newBuilder().retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build() }
+    private fun favoriteJson(context: AccountContext,path: String,body: ByteArray?=null): JSONObject {
+        requireCurrent(context)
+        if(context.owner==null) throw AccountProfileUnavailableException()
+        val signed=signer.sign("https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/$path",
+            if(body==null) officialValues() else recentOfficialValues(),body)
+        val builder=Request.Builder().url(signed.url).header("User-Agent",VendorConstants.VIDEO_UA)
+        signed.headers.forEach { (key,value) -> builder.header(key,value) }
+        (accountHeaders()+mapOf("Cookie" to cookieHeader(context.session.cookies),"X-Tt-Token" to context.session.token))
+            .forEach { (key,value) -> builder.header(key,value) }
+        body?.let { bytes -> builder.post(object: RequestBody() {
+            override fun contentType()="application/json; charset=utf-8".toMediaType()
+            override fun contentLength()=bytes.size.toLong()
+            override fun isOneShot()=true
+            override fun writeTo(sink: okio.BufferedSink) { sink.write(bytes) }
+        }) }
+        requireCurrent(context)
+        val raw=RequestScope.execute(favoriteHttp.newCall(builder.build())) { response ->
+            if(!response.isSuccessful) throw IOException("收藏请求失败（HTTP ${response.code}）")
+            responseText(response)
+        }
+        requireCurrent(context)
+        val root=try { JSONObject(raw) } catch(_: Exception) { throw IOException("收藏服务返回异常") }
+        val code=if(root.has("code")) root.opt("code") else root.opt("Code")
+        // A floating-point parser can underflow a nonzero exponent to 0. Accept only
+        // the protocol's integral zero, never a coerced/string/floating-point value.
+        val confirmed=when(code) {
+            is Byte,is Short,is Int,is Long -> (code as Number).toLong()==0L
+            is java.math.BigInteger -> code.signum()==0
+            else -> false
+        }
+        if(!confirmed) throw IOException("收藏服务未确认")
+        return root
+    }
+    fun writeFavorite(context: AccountContext,id: String,added: Boolean) {
+        require(id.matches(Regex("[0-9]{1,30}"))) { "剧集编号无效" }
+        val entry=JSONObject().put("book_id",id).put("book_type",2).put("modify_time",clock())
+            .put("video_shelf_operate_type",if(added) 0 else 1)
+        if(!added) entry.put("group_name","")
+        val root=JSONObject().put("is_cancelled",false).put("update_bookshelf_video_list",JSONArray().put(entry))
+        if(added) root.put("shark_extra",JSONObject().put("enter_from","MainFragmentActivity").put("previous_page","")
+            .put("page_list","MainFragmentActivity").put("is_active_behavior","true").put("inactive_type","0"))
+        favoriteJson(context,"bookshelf/video/update/v1/",root.toString().toByteArray(Charsets.UTF_8))
+    }
+    fun readFavoriteMembership(context: AccountContext): FavoriteMembership {
+        val root=favoriteJson(context,"bookshelf/video/info/v1/")
+        val data=root.optJSONObject("data") ?: throw IOException("收藏列表返回异常")
+        if(!data.has("video_shelf_info")) throw IOException("收藏列表未确认")
+        if(data.isNull("video_shelf_info")) return FavoriteMembership(emptySet())
+        val rows=data.optJSONArray("video_shelf_info") ?: throw IOException("收藏列表格式异常")
+        val ids=linkedSetOf<String>()
+        for(index in 0 until rows.length()) {
+            val row=rows.optJSONObject(index) ?: throw IOException("收藏记录格式异常")
+            if(row.has("video_data") && row.optJSONObject("video_data")==null) throw IOException("收藏记录格式异常")
+            val fields=listOf(row.optJSONObject("video_data") to "series_id",row to "series_id",row to "book_id")
+            var id: String?=null
+            fields.forEach { (holder,key) -> if(holder!=null && holder.has(key)) {
+                val value=holder.opt(key)
+                if(value !is String || !value.matches(Regex("[0-9]{1,30}"))) throw IOException("收藏记录编号异常")
+                if(id==null) id=value
+            } }
+            ids+=(id ?: throw IOException("收藏记录编号异常"))
+        }
+        return FavoriteMembership(java.util.Collections.unmodifiableSet(ids))
     }
     private fun accountShelfItem(row: JSONObject): Series? {
         val nested=row.optJSONObject("video_data") ?: row.optJSONObject("series_info")
