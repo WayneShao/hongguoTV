@@ -5,7 +5,6 @@ import android.app.ActivityManager
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
@@ -14,8 +13,6 @@ import android.view.View
 import android.widget.ImageView
 import okhttp3.Call
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.PriorityQueue
@@ -32,7 +29,6 @@ class ArtworkLoader(context: Context) {
         const val PRIORITY_VISIBLE = 1
         const val PRIORITY_PREFETCH = 2
         private const val MAX_PENDING = 24
-        private const val MAX_BYTES = 4 * 1024 * 1024
     }
 
     private data class Key(val url: String, val width: Int, val height: Int)
@@ -61,6 +57,7 @@ class ArtworkLoader(context: Context) {
     // This client owns its dispatcher and pool; cancelling artwork never cancels video or catalog calls.
     private val http = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS).callTimeout(12, TimeUnit.SECONDS).build()
+    private val fetcher = ArtworkFetcher(disk, http, AndroidArtworkDecoder(lowRam))
     private val workers = Executors.newFixedThreadPool(if (lowRam) 1 else 2) { runnable ->
         Thread(runnable, "hongguotv-artwork").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
@@ -240,48 +237,6 @@ class ArtworkLoader(context: Context) {
         }.sortedBy { it.priority }.take(MAX_PENDING).forEach(::request)
     }
 
-    private fun fetch(job: Job): Bitmap? {
-        val bytes = disk.get(job.key.url) ?: run {
-            if (job.cancelled) return null
-            val call = http.newCall(Request.Builder().url(job.key.url).build())
-            job.call = call
-            if (job.cancelled) { call.cancel(); return null }
-            call.execute().use { response ->
-                val body = response.body ?: return null
-                if (!response.isSuccessful || body.contentLength() > MAX_BYTES) return null
-                val out = ByteArrayOutputStream()
-                val buffer = ByteArray(8192)
-                body.byteStream().use { input ->
-                    while (!job.cancelled) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        if (out.size() + count > MAX_BYTES) return null
-                        out.write(buffer, 0, count)
-                    }
-                }
-                if (job.cancelled) return null
-                out.toByteArray().also { disk.put(job.key.url, it) }
-            }
-        }
-        if (job.cancelled) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        if (bounds.outWidth !in 1..32768 || bounds.outHeight !in 1..32768) return null
-        // Fit the entire source into the measured target. Cropping at decode time cannot be
-        // undone by ImageView.FIT_CENTER and used to remove most of a portrait poster.
-        val fit = min(1.0, min(job.key.width.toDouble() / bounds.outWidth, job.key.height.toDouble() / bounds.outHeight))
-        val width = max(1, (bounds.outWidth * fit).toInt())
-        val height = max(1, (bounds.outHeight * fit).toInt())
-        var sample = 1
-        while (bounds.outWidth / (sample * 2) >= width && bounds.outHeight / (sample * 2) >= height) sample *= 2
-        if ((bounds.outWidth / sample).toLong() * (bounds.outHeight / sample) > (if (lowRam) 2 else 4) * 1024 * 1024) return null
-        val options = BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
-        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return null
-        if (job.cancelled) { decoded.recycle(); return null }
-        val result = try { Bitmap.createScaledBitmap(decoded, width, height, true) }
-        catch (problem: Throwable) { decoded.recycle(); throw problem }
-        if (result !== decoded) decoded.recycle()
-        if (job.cancelled) { result.recycle(); return null }
-        return result
-    }
+    private fun fetch(job: Job): Bitmap? =
+        fetcher.fetch(job.key.url, job.key.width, job.key.height, { job.cancelled }, { job.call = it })
 }

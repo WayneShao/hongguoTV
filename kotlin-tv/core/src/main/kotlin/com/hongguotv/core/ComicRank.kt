@@ -35,7 +35,7 @@ internal object ComicRank {
                     val tags=row.optJSONArray("tags") ?: JSONArray()
                     val id=row.str("seriesId").ifEmpty { row.str("id") }
                     if(id !in positions) positions[id]=RankPosition(row.optInt("rank").takeIf { it>0 },row.str("heatText"))
-                    Series(id,row.str("title"),cleanUrl(row.str("cover")),
+                    Series(id,row.str("title"),CoverArt.forDisplay(row.str("cover")),
                         row.str("description"),if(count>0) "全 $count 集" else row.str("heatText"),
                         (0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optString(it) })
                 }.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
@@ -60,7 +60,7 @@ internal object ComicRank {
             if(id !in positions) positions[id]=RankPosition(
                 article.selectFirst("[class*=badge-number-]")?.text()?.toIntOrNull()?.takeIf { it>0 },
                 article.selectFirst("p[class*=metrics-]")?.text().orEmpty())
-            Series(id,title,article.selectFirst("img[src]")?.attr("src").orEmpty(),
+            Series(id,title,CoverArt.forDisplay(article.selectFirst("img[src]")?.attr("src").orEmpty()),
                 article.selectFirst("p[class*=description-]")?.text().orEmpty(),
                 article.selectFirst("p[class*=metrics-]")?.text().orEmpty(),
                 article.select("p[class*=categories-] > span").take(5).joinToString(" · ") { it.text() })
