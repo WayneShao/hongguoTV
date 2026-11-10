@@ -24,6 +24,9 @@ internal class AccountScreen(
     private val back: () -> Unit,
     private val changed: () -> Unit,
     private val open: (Series, AccountHistoryItem?, String) -> Unit,
+    private val intents: AccountIntents? = null,
+    private val openCaptured: ((Series, AccountHistoryItem?, String, AccountContext) -> Unit)? = null,
+    private val mergeFavorites: ((List<Series>, AccountContext, Long) -> Unit)? = null,
 ) {
     private val main=Handler(Looper.getMainLooper())
     private val worker=Executors.newSingleThreadExecutor()
@@ -42,6 +45,7 @@ internal class AccountScreen(
     private var zoomSurface: View?=null
     private var zoomAnchor: View?=null
     private var acceptedQr: Bitmap?=null
+    private var intentListener: (() -> Unit)?=null
     private fun dp(n: Int)=(n*activity.resources.displayMetrics.density).toInt()
     private fun label(value: String,size: Float=16f)=TextView(activity).apply {
         text=value; textSize=size; setTextColor(Color.WHITE); setPadding(dp(6),dp(5),dp(6),dp(5))
@@ -53,6 +57,7 @@ internal class AccountScreen(
     }
     fun show(host: LinearLayout,section: String?=null,focusSeries: String?=null) { close(); parent=host; if(section==null) render() else listing(section,focusSeries) }
     private fun reset(): LinearLayout {
+        detachIntents()
         cancel(); dismissZoom(); qrFrame=null; qrImage=null; zoomAnchor=null
         val host=parent ?: error("Account screen detached")
         host.removeAllViews()
@@ -73,16 +78,77 @@ internal class AccountScreen(
             body.addView(label("登录后可读取云端收藏、历史和预约，并同步登录期间的观看进度。",13f))
             action(body,"显示登录二维码") { qr() }.requestFocus()
         } else {
+            val context=repository.captureAccount() ?: return
             action(body,"云端观看历史") { listing("history") }.requestFocus()
             action(body,"云端收藏") { listing("favorites") }
             action(body,"云端预约") { listing("reservations") }
-            action(body,"刷新账号资料") { task({ repository.refreshUser() }) {
+            action(body,"刷新账号资料") { task({ repository.refreshUser() },context) {
                 AuthStore.save(activity,it); changed(); render()
             } }
             action(body,"退出红果账号") {
+                if(!repository.isCurrent(context)) return@action
                 repository.logout(); AuthStore.clear(activity); changed(); render()
             }
             body.addView(label("本机收藏和历史保留。登录前的访客记录不会批量上传。",13f))
+            if(intents!=null) {
+                action(body,"刷新收藏同步状态") {
+                    if(repository.isCurrent(context)) intents.resume(context)
+                }
+                val statuses=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL }
+                body.addView(statuses)
+                observeIntents(context) { favoriteStatuses(statuses,context) }
+            }
+        }
+    }
+    private fun generation(context: AccountContext)=intents?.revision(context) ?: 0L
+    private fun current(context: AccountContext,expectedRevision: Long)=repository.isCurrent(context) &&
+        expectedRevision>=0 && generation(context)==expectedRevision
+    private fun detachIntents() {
+        intentListener?.let { intents?.removeListener(it) }; intentListener=null
+    }
+    /** Coordinator events only update this page's content, never reset a live QR presentation. */
+    private fun observeIntents(context: AccountContext,update: ()->Unit) {
+        detachIntents()
+        val coordinator=intents ?: return
+        val ticket=revision; val targetPage=page
+        val listener: ()->Unit = {
+            val capturedGeneration=generation(context)
+            main.post {
+                if(parent!=null && !activity.isDestroyed && ticket==revision && page==targetPage &&
+                    current(context,capturedGeneration)) update()
+            }
+        }
+        intentListener=listener; coordinator.addListener(listener)
+        if(repository.isCurrent(context)) update()
+    }
+    private fun retryable(status: AccountIntents.FavoriteStatus)=status in setOf(
+        AccountIntents.FavoriteStatus.OUTCOME_UNKNOWN,AccountIntents.FavoriteStatus.FAILED,
+        AccountIntents.FavoriteStatus.SUBMITTED_UNCONFIRMED)
+    private fun favoriteStatuses(target: LinearLayout,context: AccountContext) {
+        val coordinator=intents ?: return
+        if(!repository.isCurrent(context)) return
+        target.removeAllViews()
+        target.addView(label("收藏同步状态",18f))
+        if(!coordinator.isReady()) { target.addView(label("正在读取本机同步状态…",13f)); return }
+        val entries=coordinator.favoriteEntries(context)
+        if(entries.isEmpty()) target.addView(label("暂无收藏同步操作",13f))
+        val ticket=revision; val capturedGeneration=generation(context)
+        entries.forEach { entry ->
+            val verb=if(entry.added) "收藏" else "取消收藏"
+            val message=when(entry.status) {
+                AccountIntents.FavoriteStatus.PENDING -> "$verb：等待提交"
+                AccountIntents.FavoriteStatus.SUBMITTING -> "$verb：正在提交，结果尚未确认"
+                AccountIntents.FavoriteStatus.OUTCOME_UNKNOWN -> "$verb：结果未知，请刷新确认或明确重试"
+                AccountIntents.FavoriteStatus.SUBMITTED_UNCONFIRMED -> "已提交$verb，云端尚未确认"
+                AccountIntents.FavoriteStatus.CONFIRMED -> "$verb：云端已确认"
+                AccountIntents.FavoriteStatus.FAILED -> "$verb：提交失败，尚未确认"
+            }
+            target.addView(label("${entry.id} · $message",13f))
+            if(retryable(entry.status)) action(target,"重试$verb（${entry.id}）") {
+                if(ticket!=revision || page!="home" || !current(context,capturedGeneration)) return@action
+                val latest=coordinator.favoriteEntries(context).firstOrNull { it.id==entry.id }
+                if(latest!=null && latest.revision==entry.revision && retryable(latest.status)) coordinator.retryFavorite(context,entry.id)
+            }
         }
     }
     private fun qr(enlarged: Boolean=false) {
@@ -188,43 +254,95 @@ internal class AccountScreen(
     private fun listing(kind: String,focusSeries: String?=null) {
         val body=reset(); page="list"
         action(body,"返回账号") { render() }.requestFocus()
-        action(body,"刷新列表") { listing(kind) }
+        val context=repository.captureAccount()
+        action(body,"刷新列表") {
+            if(context!=null && repository.isCurrent(context)) { intents?.resume(context); listing(kind) }
+        }
         status=label("正在读取云端列表…"); body.addView(status)
-        task({ when(kind) {
-            "history" -> repository.accountResumeHistory()
-            "favorites" -> repository.accountFavorites()
-            else -> repository.accountReservations()
-        } }) { page ->
-            status?.text=if(page.items.isEmpty()) "云端暂无记录" else "已读取 ${page.items.size} 部剧集"
-            page.items.forEach { series ->
-                val progress=page.history.firstOrNull { it.series.id==series.id }
-                val reservation=page.reservations.firstOrNull { it.series.id==series.id }
-                val suffix=progress?.let { " · 第 ${it.episodeIndex+1} 集" } ?: if(series.preview) " · 待上线" else ""
-                action(body,series.title+suffix) {
-                    if(series.preview || reservation?.online==false) reservationActions(series,reservation)
-                    else open(series,progress,kind)
-                }.also { if(series.id==focusSeries) it.requestFocus() }
+        if(context==null) { status?.text="请先登录"; return }
+        val pullRevision=generation(context)
+        val rows=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL }; body.addView(rows)
+        task({
+            repository.requireCurrent(context)
+            val result=when(kind) {
+                "history" -> repository.accountResumeHistory(context.session)
+                "favorites" -> repository.accountFavorites(context)
+                else -> repository.accountReservations()
             }
+            repository.requireCurrent(context)
+            result
+        },context) { result ->
+            if(kind=="favorites" && current(context,pullRevision)) {
+                val allowed=result.items.filter { intents?.suppressFavorite(context,it.id)!=true }
+                if(current(context,pullRevision)) mergeFavorites?.invoke(allowed,context,pullRevision)
+            }
+            // A pull payload is only ever authorized for the intent generation it was requested under.
+            // A later delete/rewatch must not re-authorize it: invalidate the list instead of refetching.
+            var payloadValid=true
+            val update: ()->Unit = update@ {
+                if(!payloadValid) return@update
+                if(!current(context,pullRevision)) {
+                    payloadValid=false
+                    rows.removeAllViews()
+                    if(repository.isCurrent(context)) status?.text="账号同步状态已变化，请刷新列表"
+                    return@update
+                }
+                val ticket=revision
+                val items=result.items.filter { series -> when(kind) {
+                    "history" -> intents?.suppressHistory(context,series.id)!=true
+                    "favorites" -> intents?.suppressFavorite(context,series.id)!=true
+                    else -> true
+                } }
+                rows.removeAllViews()
+                status?.text=if(items.isEmpty()) "云端暂无记录" else "已读取 ${items.size} 部剧集"
+                items.forEach { series ->
+                    val progress=result.history.firstOrNull { it.series.id==series.id }
+                    val reservation=result.reservations.firstOrNull { it.series.id==series.id }
+                    val suffix=progress?.let { " · 第 ${it.episodeIndex+1} 集" } ?: if(series.preview) " · 待上线" else ""
+                    action(rows,series.title+suffix) {
+                        if(ticket!=revision || page!="list" || !current(context,pullRevision)) return@action
+                        if(kind=="history" && intents?.suppressHistory(context,series.id)==true) return@action
+                        if(kind=="favorites" && intents?.suppressFavorite(context,series.id)==true) return@action
+                        if(series.preview || reservation?.online==false) reservationActions(series,reservation,context,pullRevision)
+                        else if(openCaptured!=null) openCaptured.invoke(series,progress,kind,context)
+                        else open(series,progress,kind)
+                    }.also { if(series.id==focusSeries) it.requestFocus() }
+                }
+            }
+            if(intents==null) update() else observeIntents(context,update)
         }
     }
-    private fun reservationActions(series: Series,reservation: AccountReservation?) {
+    private fun reservationActions(series: Series,reservation: AccountReservation?,context: AccountContext,expectedRevision: Long) {
+        if(!current(context,expectedRevision)) return
         val body=reset(); page="reservation"
         action(body,"返回预约列表") { listing("reservations") }.requestFocus()
         body.addView(label(series.title,20f)); status=label(reservation?.expectedText.orEmpty().ifBlank { "剧集尚未上线" }); body.addView(status)
         if(reservation!=null) action(body,if(reservation.subscribed) "取消预约" else "预约") {
-            task({ repository.setReservation(series.id,!reservation.subscribed,reservation.itemType) }) { listing("reservations") }
+            if(!current(context,expectedRevision)) return@action
+            task({
+                repository.requireCurrent(context)
+                val result=repository.setReservation(series.id,!reservation.subscribed,reservation.itemType)
+                repository.requireCurrent(context)
+                result
+            },context) { listing("reservations") }
         }
     }
-    private fun <T> task(work: ()->T,done: (T)->Unit) {
+    private fun <T> task(work: ()->T,context: AccountContext?=null,done: (T)->Unit) {
         val ticket=revision; val request=RequestScope(); scope?.cancel(); future?.cancel(true); scope=request
         future=worker.submit {
-            val result=runCatching { request.run(work) }
+            val result=runCatching { request.run { context?.let(repository::requireCurrent); work() } }
             main.post {
                 if(ticket!=revision || parent==null || activity.isDestroyed) return@post
+                // Guard failures too: an old expired request must never log out a replacement session.
+                // QR work deliberately has no context: its own successful login changes null -> auth.
+                if(context!=null && !repository.isCurrent(context)) return@post
                 result.onSuccess(done).onFailure {
                     val message=it.message.orEmpty()
                     val expired=message.contains("未登录") || message.contains("登录已过期") || message.contains("请先登录")
-                    if(expired) { repository.logout(); AuthStore.clear(activity); changed(); render(); status?.text="登录已过期，请重新扫码" }
+                    if(expired) {
+                        if(context!=null && !repository.isCurrent(context)) return@onFailure
+                        repository.logout(); AuthStore.clear(activity); changed(); render(); status?.text="登录已过期，请重新扫码"
+                    }
                     else if(it is AccountProfileUnavailableException) qrMessage(it.message.orEmpty())
                     else qrMessage("账号请求失败，请重试（${it.javaClass.simpleName}）")
                 }
@@ -239,6 +357,6 @@ internal class AccountScreen(
         qrImage?.let { displayQr(it,null) }; zoomImage?.let { displayQr(it,null) }
     }
     fun goBack() { if(zoomSurface!=null) dismissZoom() else when(page) { "home" -> back(); "reservation" -> listing("reservations"); else -> render() } }
-    fun close() { cancel(); dismissZoom(); qrFrame=null; qrImage=null; zoomAnchor=null; AuthStore.restore(activity,repository); parent=null; status=null }
+    fun close() { detachIntents(); cancel(); dismissZoom(); qrFrame=null; qrImage=null; zoomAnchor=null; AuthStore.restore(activity,repository); parent=null; status=null }
     fun destroy() { close(); worker.shutdownNow() }
 }
