@@ -136,6 +136,34 @@ class MainActivity: Activity() {
         if(!pullAllowed(context,revision)) return
         library.mergeCloudFavorites(items.filterNot { accountIntents.suppressFavorite(context,it.id) })
     }
+    private val progressMergeDelegate=lazy {
+        AccountProgressMerge(accountRepository,accountIntents,accountHistorySync,
+            snapshot={ library.history() },eligible=::mergeProgressEligible,
+            apply=::applyMergedProgress,claim=::claimMergedProgress)
+    }
+    private fun mergeProgressEligible(context: AccountContext,id: String): Boolean {
+        if(!selectionAllowed(context) || !library.isLoaded || context.owner==null ||
+            !accountIntents.bindHistory(context) || accountIntents.suppressHistory(context,id)) return false
+        val stored=accountOwners.getString(id,null)
+        val legacy=context.session.user.id.takeIf { it.isNotBlank() && it!="0" }
+        return stored==null || stored==context.owner || (legacy!=null && stored==legacy) ||
+            stored=="epoch:${context.credentialOwner}:${context.epoch}"
+    }
+    private fun applyMergedProgress(context: AccountContext,progress: WatchProgress): Boolean =
+        mergeProgressEligible(context,progress.series.id) && library.mergeProgress(progress)
+    private fun claimMergedProgress(context: AccountContext,id: String) {
+        if(!mergeProgressEligible(context,id)) return
+        val progress=library.progress(id) ?: return
+        accountOwners.edit().putString(id,context.owner).apply()
+        if(cloudOwner!=cloudKey(context)) cloudHistory.clear()
+        cloudOwner=cloudKey(context)
+        cloudHistory[id]=AccountHistoryItem(progress.series,progress.episodeId,progress.episodeIndex,
+            progress.position,progress.duration,progress.updatedAt)
+    }
+    private fun startProgressMerge(context: AccountContext,done: (String)->Unit): Boolean {
+        if(!selectionAllowed(context) || !library.isLoaded) return false
+        return progressMergeDelegate.value.start(context) { done(it.message()) }
+    }
     private fun showExpiredSelection(series: Series) {
         pendingDetail=series
         invalidatePage(); releaseCatalogViews(); screen="detail"; detail=null
@@ -153,7 +181,8 @@ class MainActivity: Activity() {
         val host=column(); body.addView(host,lp(-1,0).apply { weight=1f })
         val controller=AccountScreen(this,accountRepository,{ title,action -> button(title,onClick=action) },
             { accountReturn=false; tab=5; showCatalog() },::accountChanged,
-            { _,_,_ -> },intents=accountIntents,openCaptured=::openAccountSelection,mergeFavorites=::mergeAccountFavorites)
+            { _,_,_ -> },intents=accountIntents,openCaptured=::openAccountSelection,mergeFavorites=::mergeAccountFavorites,
+            mergeProgress=::startProgressMerge)
         accountScreen=controller; controller.show(host,section,focusSeries)
     }
 
@@ -1992,6 +2021,7 @@ class MainActivity: Activity() {
     }
     override fun onDestroy() {
         accountRetired=true
+        if(progressMergeDelegate.isInitialized()) progressMergeDelegate.value.close()
         accountScreen?.destroy(); accountScreen=null; accountHistorySync.close(); accountIntents.close()
         generation++; cancelWork()
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)

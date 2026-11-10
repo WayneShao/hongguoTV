@@ -205,4 +205,32 @@ class AccountActivityIntentTest {
             drain(f.intents,"http"); assertEquals(0,f.posts.get())
         }
     }
+    @Test fun manualMergeEligibilityIncludesUnassignedGuestsButRejectsForeignAndDeletedHistory() {
+        Fixture().use { f ->
+            val context=f.context()
+            val owners=f.activity.getSharedPreferences("account-local-progress-owners",0)
+            assertEquals(true,call(f.activity,"mergeProgressEligible",context,"11"))
+            owners.edit().putString("11","other-owner").commit()
+            assertEquals(false,call(f.activity,"mergeProgressEligible",context,"11"))
+            owners.edit().putString("11",context.owner).commit()
+            assertEquals(true,call(f.activity,"mergeProgressEligible",context,"11"))
+            f.intents.deleteHistory(context,setOf("11"))
+            assertEquals(false,call(f.activity,"mergeProgressEligible",context,"11"))
+            f.repo.logout(); f.repo.restoreSession(session())
+            assertEquals(false,call(f.activity,"mergeProgressEligible",context,"12"))
+            assertEquals(0,f.posts.get())
+        }
+    }
+    @Test fun mergedWinnerClaimsCurrentOwnerAndReplacesStaleCloudResumeWithoutChangingPlayerSelection() {
+        Fixture().use { f ->
+            val context=f.context(); f.select(context); f.detail()
+            val winner=WatchProgress(f.series,"92",1,300,1000,false,1)
+            assertEquals(true,call(f.activity,"applyMergedProgress",context,winner))
+            call(f.activity,"claimMergedProgress",context,"11")
+            assertEquals(context.owner,f.activity.getSharedPreferences("account-local-progress-owners",0).getString("11",null))
+            assertEquals(winner,call(f.activity,"accountProgress","11"))
+            assertEquals(context,field("playbackAccount").get(f.activity))
+            assertEquals(0,f.posts.get())
+        }
+    }
 }
