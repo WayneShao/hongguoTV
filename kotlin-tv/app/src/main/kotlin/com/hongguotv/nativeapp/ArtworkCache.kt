@@ -21,4 +21,8 @@ class ArtworkCache(private val directory: File) {
             files.forEachIndexed { index,f -> size+=f.length(); if(size>24*1024*1024 || index>=100) f.delete() }
         }
     }
+    /** Drop an entry that failed to decode so a later attempt does not reuse it. */
+    @Synchronized fun remove(url: String) {
+        runCatching { file(url).delete() }
+    }
 }

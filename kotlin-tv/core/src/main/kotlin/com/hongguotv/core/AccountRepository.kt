@@ -459,7 +459,7 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
         val title=cleanText(firstText(video ?: JSONObject(),"series_title","title","book_name")
             .ifEmpty { firstText(row,"series_title","book_name","title","name") })
         if(id.isBlank() || title.isBlank()) return null
-        val cover=cleanUrl(firstText(row,"thumb_url","cover","cover_url","image_url")
+        val cover=CoverArt.forDisplay(firstText(row,"thumb_url","cover","cover_url","image_url")
             .ifEmpty { firstText(video ?: JSONObject(),"series_cover","cover","thumb_url") })
         val description=cleanText(firstText(video ?: JSONObject(),"series_intro","description","abstract")
             .ifEmpty { firstText(row,"series_intro","book_abstract","description") })
@@ -504,7 +504,7 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
         val title=cleanText(firstText(nested,"series_title","book_name","title","name")
             .ifEmpty { firstText(row,"series_title","book_name","title","name") })
         if(id.isBlank() || title.isBlank()) return null
-        val cover=cleanUrl(firstText(nested,"series_cover","cover","thumb_url","cover_url","image_url")
+        val cover=CoverArt.forDisplay(firstText(nested,"series_cover","cover","thumb_url","cover_url","image_url")
             .ifEmpty { firstText(row,"series_cover","cover","thumb_url","cover_url","image_url") })
         val description=cleanText(firstText(nested,"series_intro","description","abstract")
             .ifEmpty { firstText(row,"series_intro","description","abstract") })
@@ -552,7 +552,7 @@ class AccountRepository(val content: ContentRepository = ContentRepository(), pr
         val id=numericId(row.str("item_id").ifEmpty { row.str("item_id_str") },row.str("series_id"),row.str("book_id"))
         val title=cleanText(firstText(row,"name","title","book_name","series_name"))
         if(id.isBlank() || title.isBlank()) return null
-        val cover=cleanUrl(firstText(row,"cover","thumb_url","cover_url","image_url"))
+        val cover=CoverArt.forDisplay(firstText(row,"cover","thumb_url","cover_url","image_url"))
         val description=cleanText(firstText(row,"item_desc","description","summary"))
         val online=accountBool(row,"is_online")
         val expectedAt=row.optLong("expected_publish_time",

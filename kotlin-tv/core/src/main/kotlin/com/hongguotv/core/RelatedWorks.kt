@@ -132,7 +132,7 @@ object RelatedWorks {
                     Series(
                         id,
                         title,
-                        cleanUrl(row.str("cover")),
+                        CoverArt.forDisplay(row.str("cover")),
                         row.str("video_desc"),
                         if (upcoming) "待上线" else "全 ${row.optInt("episode_cnt")} 集",
                     ),

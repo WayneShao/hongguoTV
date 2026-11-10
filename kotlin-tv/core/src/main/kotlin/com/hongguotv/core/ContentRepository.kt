@@ -68,7 +68,7 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
         val o=item.optJSONObject("video_data") ?: item
         val count=o.optInt("episode_cnt",o.optJSONObject("series_episode_info")?.optInt("episode_cnt",0) ?: 0)
         val tags=o.optJSONArray("tags") ?: o.optJSONArray("category_list") ?: JSONArray()
-        return Series(o.str("series_id"),o.str("series_name").ifEmpty { o.str("series_title").ifEmpty { item.str("name") } },cleanUrl(o.str("series_cover")),o.str("series_intro"),o.str("episode_right_text").ifEmpty { if(count>0) "全 ${count} 集" else "" },(0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
+        return Series(o.str("series_id"),o.str("series_name").ifEmpty { o.str("series_title").ifEmpty { item.str("name") } },CoverArt.forDisplay(o.str("series_cover")),o.str("series_intro"),o.str("episode_right_text").ifEmpty { if(count>0) "全 ${count} 集" else "" },(0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
     }
     private fun valid(rows: List<Series>) = rows.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
     private fun isIdentityRisk(httpCode: Int, body: String): Boolean {
@@ -178,7 +178,7 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
                 val id=video.str("series_id").ifEmpty { row.str("book_id").ifEmpty { row.str("search_result_id") } }
                 val title=row.optJSONObject("search_high_light")?.optJSONObject("title")?.str("text").orEmpty().ifEmpty { video.str("title").ifEmpty { row.str("cell_name") } }
                 val count=video.optInt("episode_cnt")
-                list+=Series(id,title,cleanUrl(video.str("cover").ifEmpty { video.str("cover_url") }),video.str("video_desc"),if(count>0) "全 $count 集" else video.str("rec_text"),video.str("sub_title"),bookType=video.optInt("book_type",row.optInt("book_type",2)))
+                list+=Series(id,title,CoverArt.forDisplay(video.str("cover").ifEmpty { video.str("cover_url") }),video.str("video_desc"),if(count>0) "全 $count 集" else video.str("rec_text"),video.str("sub_title"),bookType=video.optInt("book_type",row.optInt("book_type",2)))
             }
         }
         synchronized(searchCursors) {
