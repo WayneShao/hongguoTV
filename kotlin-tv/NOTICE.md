@@ -81,3 +81,14 @@ pre-end season hints follow PR #82 (GPL-3.0-only). These are adapted
 to this fork's release-body manifest, signed request paths, bounded recovery and
 platform compatibility. See [maintenance scope](../docs/MAINTENANCE_0.12.6.md)
 for source links and verification requirements.
+
+## Maintenance integration (2026-11-10)
+
+Cover compatibility follows fyworld/hongguoTV `110abb2a85da363d15aed4632167920ed3e9bad5`;
+episode completion history follows the focused portion of PangTouY00/hongguoTV
+PR #32; QR enlargement follows wanwdbb/hongguoTV
+`4ff70cd60909f07530c81c398901e3bf8e043ad1`; account deletion intent and favorite
+read-back follow fyworld/hongguoTV `5c901951c8fbf9183cfa2a9370f4e4007b366e1b`
+and `9bdb5121da20ff2d2933e34126cddb827fe77b74` (GPL-3.0-only).
+These are adapted to the existing library, signed account repository and
+account-isolated outbox. See [port scope](../docs/PORTS_2026-11-10.md).
