@@ -62,6 +62,7 @@ class AccountActivityIntentTest {
         init {
             activity.getSharedPreferences("account-history-outbox-v1",0).edit().clear().commit()
             activity.getSharedPreferences("account-local-progress-owners",0).edit().clear().commit()
+            activity.getSharedPreferences("auto-progress-sync-v1",0).edit().clear().commit()
             Library::class.java.getDeclaredField("index").apply { isAccessible=true }.set(library,
                 LibraryIndex(BackupData(emptyList(),emptyList(),emptySet(),emptyList(),BackupSettings())))
             field("library").set(activity,library)
@@ -92,6 +93,13 @@ class AccountActivityIntentTest {
         fun save(position: Long=100)=call(activity,"saveProgressAt",0,position,1000L,false)
         fun detail() { field("detail").set(activity,Detail(series,listOf("91","92"))) }
         override fun close() {
+            for(name in listOf("autoProgressSyncDelegate","progressMergeDelegate")) {
+                val delegate=field(name).get(activity) as Lazy<*>
+                if(delegate.isInitialized()) when(val value=delegate.value) {
+                    is AutoProgressSync -> value.close()
+                    is AccountProgressMerge -> value.close()
+                }
+            }
             sync.close(); intents.close(); library.close()
             for(name in listOf("io","prefetchWorker","networkCleanup")) (field(name).get(activity) as ExecutorService).shutdownNow()
             shadowOf(Looper.getMainLooper()).idle()
@@ -231,6 +239,55 @@ class AccountActivityIntentTest {
             assertEquals(winner,call(f.activity,"accountProgress","11"))
             assertEquals(context,field("playbackAccount").get(f.activity))
             assertEquals(0,f.posts.get())
+        }
+    }
+
+    @Test fun automaticEligibilityKeepsGuestRecordsLocalButAcceptsCloudOnlyAndOwnedRows() {
+        Fixture().use { f ->
+            val context=f.context()
+            assertEquals(true,call(f.activity,"automaticMergeEligible",context,"11"))
+            f.library.save(WatchProgress(f.series,"91",0,200,1000,false,1))
+            assertEquals(false,call(f.activity,"automaticMergeEligible",context,"11"))
+            assertEquals(true,call(f.activity,"mergeProgressEligible",context,"11"))
+            val owners=f.activity.getSharedPreferences("account-local-progress-owners",0)
+            owners.edit().putString("11",context.owner).commit()
+            assertEquals(true,call(f.activity,"automaticMergeEligible",context,"11"))
+            owners.edit().putString("11","other-owner").commit()
+            assertEquals(false,call(f.activity,"automaticMergeEligible",context,"11"))
+            owners.edit().putString("11",context.owner).commit()
+            f.intents.deleteHistory(context,setOf("11"))
+            assertEquals(false,call(f.activity,"automaticMergeEligible",context,"11"))
+            assertEquals(0,f.posts.get())
+        }
+    }
+
+    @Test fun automaticChecksAreWiredToForegroundHomeResumeAndRecentLoadsOnly() {
+        Fixture().use { f ->
+            var starts=0
+            val auto=AutoProgressSync(f.activity,f.repo,start={ _,_-> starts++; false },updated={ _,_-> })
+            auto.enabled=true
+            field("autoProgressSyncDelegate").set(f.activity,lazyOf(auto))
+            field("foreground").setBoolean(f.activity,true)
+            field("screen").set(f.activity,"catalog")
+            fun load(tab: Int,page: Int=1,collection: String?=null) {
+                field("tab").setInt(f.activity,tab); field("page").setInt(f.activity,page)
+                field("collection").set(f.activity,collection)
+                call(f.activity,"historyRecordsLoaded")
+            }
+            load(0); assertEquals(1,starts)
+            load(4); assertEquals(2,starts)
+            load(0,collection="resume"); assertEquals(3,starts)
+            for(tab in listOf(1,2,3,5)) load(tab)
+            load(0,page=2); load(0,collection="later")
+            assertEquals(3,starts)
+            field("foreground").setBoolean(f.activity,false); load(4)
+            field("foreground").setBoolean(f.activity,true)
+            field("screen").set(f.activity,"player"); load(4)
+            field("screen").set(f.activity,"catalog")
+            field("accountReady").setBoolean(f.activity,false); load(4)
+            field("accountReady").setBoolean(f.activity,true)
+            field("accountRetired").setBoolean(f.activity,true); load(4)
+            assertEquals(3,starts); assertEquals(0,f.posts.get())
         }
     }
 }

@@ -15,12 +15,13 @@ internal class AccountProgressMerge(
     private val apply: (AccountContext,BackupProgress) -> Boolean,
     private val claim: (AccountContext,String) -> Unit,
     private val resolve: (String) -> Detail = repository::detail,
+    private val automaticEligible: (AccountContext,String) -> Boolean = {_,_->false},
 ) {
     data class Result(val localUpdated: Int=0,val pending: Int=0,val skipped: Int=0,val error: String?=null) {
         fun message() = "本地更新 $localUpdated，待上报 $pending，跳过 $skipped" +
             (error?.let { "；$it" } ?: "。待上报记录将由后台提交。")
     }
-    private class Operation(val context: AccountContext,val generation: Long,val done: (Result)->Unit) {
+    private class Operation(val context: AccountContext,val generation: Long,val done: (Result)->Unit,val automatic: Boolean) {
         var updated=0; var pending=0; var skipped=0
     }
     private data class Item(val id: String,val detail: Detail?,val remote: List<BackupProgress>)
@@ -30,16 +31,28 @@ internal class AccountProgressMerge(
     private fun current(op: Operation)=!closed && operation===op && repository.isCurrent(op.context) &&
         intents.revision(op.context)==op.generation
 
-    fun start(context: AccountContext,done: (Result)->Unit): Boolean {
+    fun start(context: AccountContext,done: (Result)->Unit): Boolean=startInternal(context,false,done)
+    fun startAutomatically(context: AccountContext,done: (Result)->Unit): Boolean=startInternal(context,true,done)
+    private fun startInternal(context: AccountContext,automatic: Boolean,done: (Result)->Unit): Boolean {
         check(Looper.myLooper()==Looper.getMainLooper())
-        if(closed || operation!=null || context.owner==null || !repository.isCurrent(context) ||
+        if(closed) return false
+        operation?.let { active ->
+            if(!repository.isCurrent(active.context)) {
+                // Switching accounts invalidates the old merge instead of blocking the new owner.
+                operation=null
+                sync.endMerge(active.context)
+            }
+        }
+        if(operation!=null || context.owner==null || !repository.isCurrent(context) ||
             !intents.isReady() || !intents.bindHistory(context)) return false
-        val op=Operation(context,intents.revision(context),done)
+        val op=Operation(context,intents.revision(context),done,automatic)
         val local=snapshot().toList()
         operation=op
         if(!sync.beginMerge(context) { read(op,local) }) { operation=null; return false }
         return true
     }
+    private fun allowed(op: Operation,id: String)=eligible(op.context,id) &&
+        (!op.automatic || automaticEligible(op.context,id))
     private fun read(op: Operation,local: List<BackupProgress>) {
         try {
             check(current(op))
@@ -82,7 +95,7 @@ internal class AccountProgressMerge(
         val item=items[index]
         fun next() { process(op,items,index+1) }
         val detail=item.detail
-        if(detail==null || !eligible(op.context,item.id) || intents.suppressHistory(op.context,item.id)) {
+        if(detail==null || !allowed(op,item.id) || intents.suppressHistory(op.context,item.id)) {
             op.skipped++; next(); return
         }
         val local=snapshot().firstOrNull { it.series.id==item.id }
@@ -94,7 +107,7 @@ internal class AccountProgressMerge(
         val checkpoint=HistoryCheckpoint(winner,detail.series.bookType,detail.episodes.size)
         val accepted: (Boolean)->Unit = accepted@ { okay ->
             if(!current(op)) { finish(op,"账号或观看记录已变化，请重新合并。"); return@accepted }
-            if(!okay || !eligible(op.context,item.id) || !intents.historyAllowed(op.context,item.id,token)) {
+            if(!okay || !allowed(op,item.id) || !intents.historyAllowed(op.context,item.id,token)) {
                 op.skipped++; next(); return@accepted
             }
             // A guest/local edit can occur without an account-generation change while disk commits.
