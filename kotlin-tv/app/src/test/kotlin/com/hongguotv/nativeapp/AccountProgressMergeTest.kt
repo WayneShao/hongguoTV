@@ -83,12 +83,15 @@ class AccountProgressMergeTest {
             library.loadAsync { }
             until { library.isLoaded }
             sync=AccountHistorySync(activity,repo,intents)
+            fun manualEligible(ctx: AccountContext,id: String)=owners[id].let { it==null || it==ctx.owner }
             merge=AccountProgressMerge(repo,intents,sync,snapshot={ library.history() },
-                eligible={ ctx,id -> owners[id].let { it==null || it==ctx.owner } },
+                eligible={ ctx,id -> manualEligible(ctx,id) },
                 apply={ _,p -> library.mergeProgress(p) },claim={ ctx,id -> owners[id]=ctx.owner!! },
-                resolve={ id -> resolutions++; if(realDetail) repo.detail(id) else Detail(Series(id,"fixture",bookType=2),listOf("999","456","111")) })
+                resolve={ id -> resolutions++; if(realDetail) repo.detail(id) else Detail(Series(id,"fixture",bookType=2),listOf("999","456","111")) },
+                automaticEligible={ ctx,id -> manualEligible(ctx,id) && (library.progress(id)==null || owners[id]!=null) })
         }
-        fun start(): Boolean=merge.start(context) { result=it }
+        fun start(): Boolean { result=null; return merge.start(context) { result=it } }
+        fun startAuto(): Boolean { result=null; return merge.startAutomatically(context) { result=it } }
         fun finish() { until { result!=null } }
         fun rows()=JSONObject(activity.getSharedPreferences("account-history-outbox-v1",Context.MODE_PRIVATE).getString(context.legacyOwner,"{}")!!)
         override fun close() { network.release.countDown(); merge.close(); sync.close(); intents.close(); library.close(); activity.finish() }
@@ -170,6 +173,32 @@ class AccountProgressMergeTest {
             assertEquals(f.context.owner,f.owners["123"])
             assertEquals("other-account",f.owners["124"])
             assertTrue(f.intents.suppressHistory(f.context,"125"))
+        }
+    }
+    @Test fun automaticStartSkipsUnownedGuestRowsButManualStillIncludesThem() {
+        Fixture().use { f ->
+            f.library.save(row("123"))
+            assertTrue(f.startAuto()); f.finish()
+            assertEquals(0,f.result!!.localUpdated); assertEquals(1,f.result!!.skipped)
+            assertEquals(0,f.rows().length()); assertTrue(f.owners.isEmpty())
+            assertTrue(f.start()); f.finish()
+            assertEquals(1,f.result!!.pending)
+            assertTrue(f.rows().has("123"))
+            assertEquals(f.context.owner,f.owners["123"])
+        }
+    }
+    @Test fun automaticStartImportsCloudOnlyAndOwnedLocalWhileSkippingForeignAndDeleted() {
+        Fixture().use { f ->
+            f.network.cloud(id="124")
+            f.library.save(row("125")); f.owners["125"]=f.context.owner!!
+            f.library.save(row("126")); f.owners["126"]="other-account"
+            f.library.save(row("127")); f.intents.deleteHistory(f.context,setOf("127"))
+            assertTrue(f.startAuto()); f.finish()
+            assertEquals("456",f.library.progress("124")!!.episodeId)
+            assertEquals(1,f.result!!.localUpdated); assertEquals(1,f.result!!.pending); assertEquals(2,f.result!!.skipped)
+            assertTrue(f.rows().has("125")); assertFalse(f.rows().has("126")); assertFalse(f.rows().has("127"))
+            assertEquals("other-account",f.owners["126"])
+            assertTrue(f.intents.suppressHistory(f.context,"127"))
         }
     }
     @Test fun progressOnlyRemoteResolvesCatalogAndImportsWithoutInferringCompletion() {

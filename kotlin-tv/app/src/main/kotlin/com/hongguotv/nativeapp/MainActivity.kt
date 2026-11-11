@@ -139,7 +139,33 @@ class MainActivity: Activity() {
     private val progressMergeDelegate=lazy {
         AccountProgressMerge(accountRepository,accountIntents,accountHistorySync,
             snapshot={ library.history() },eligible=::mergeProgressEligible,
-            apply=::applyMergedProgress,claim=::claimMergedProgress)
+            apply=::applyMergedProgress,claim=::claimMergedProgress,automaticEligible=::automaticMergeEligible)
+    }
+    private val autoProgressSyncDelegate=lazy {
+        AutoProgressSync(this,accountRepository,start={ context,done ->
+            selectionAllowed(context) && library.isLoaded && progressMergeDelegate.value.startAutomatically(context,done)
+        },updated={ context,result ->
+            if(selectionAllowed(context) && result.localUpdated>0) refreshLoadedHistory()
+        })
+    }
+    private fun automaticMergeEligible(context: AccountContext,id: String): Boolean =
+        mergeProgressEligible(context,id) && (library.progress(id)==null || accountOwners.getString(id,null)!=null)
+    private fun historyPageLoaded(): Boolean = foreground && screen=="catalog" &&
+        (collection=="resume" || collection==null && (tab==4 || tab==0 && page==1))
+    private fun historyRecordsLoaded() {
+        if(!historyPageLoaded() || !library.isLoaded || !accountReady || accountRetired || !accountIntents.isReady()) return
+        autoProgressSyncDelegate.value.recordsLoaded()
+    }
+    private fun refreshLoadedHistory() {
+        if(!historyPageLoaded() || tvTools.showing || updater.showing) return
+        homeScreen?.let { it.updateShelves(homeShelves()); it.refreshSelection(); return }
+        val body=catalogBody ?: return
+        val retained=currentFocus?.takeIf { it in nav || it===historyManage || it in typeButtons.values }
+        scrollPositions[catalogPageKey]=catalogScroll?.scrollY ?: 0
+        catalog=localItems(); page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize))
+        hasMore=page*pageSize<catalog.size
+        artwork.cancelPage(); body.removeAllViews(); catalogGrid(body,retained in nav)
+        retained?.requestFocus()
     }
     private fun mergeProgressEligible(context: AccountContext,id: String): Boolean {
         if(!selectionAllowed(context) || !library.isLoaded || context.owner==null ||
@@ -162,7 +188,10 @@ class MainActivity: Activity() {
     }
     private fun startProgressMerge(context: AccountContext,done: (String)->Unit): Boolean {
         if(!selectionAllowed(context) || !library.isLoaded) return false
-        return progressMergeDelegate.value.start(context) { done(it.message()) }
+        return progressMergeDelegate.value.start(context) {
+            autoProgressSyncDelegate.value.manualCompleted(context,it)
+            done(it.message())
+        }
     }
     private fun showExpiredSelection(series: Series) {
         pendingDetail=series
@@ -398,7 +427,7 @@ class MainActivity: Activity() {
         AuthStore.restore(this,accountRepository)
         accountIntents.loadAsync { ready -> main.post {
             if(!isDestroyed && !accountRetired) {
-                if(ready) { accountReady=true; resumeAccountSync() }
+                if(ready) { accountReady=true; resumeAccountSync(); historyRecordsLoaded() }
                 else Toast.makeText(this,"账号同步状态读取失败，仅保留本机操作",Toast.LENGTH_LONG).show()
             }
         } }
@@ -537,6 +566,7 @@ class MainActivity: Activity() {
             catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
         }
         invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
+        historyRecordsLoaded()
         if(foreground && library.isLoaded && !favoriteMonitor.running) main.post { if(foreground && screen=="catalog") favoriteMonitor.check() }
         val top=row().apply { setPadding(0,0,0,dp(8)) }
         val brand=row()
@@ -909,6 +939,20 @@ class MainActivity: Activity() {
             seasonButton.text="跨季自动连播  ·  ${if(library.seasonAutoplay) "开启" else "关闭"}"
             if(library.seasonAutoplay && !library.autoNext) Toast.makeText(this,"还需开启自动连播才会生效",Toast.LENGTH_LONG).show()
         }
+        val autoSync=autoProgressSyncDelegate.value
+        lateinit var autoSyncButton: TextView
+        autoSyncButton=setting(device,"观看记录自动同步  ·  ${if(autoSync.enabled) "开启" else "关闭"}") {
+            autoSync.enabled=!autoSync.enabled
+            autoSyncButton.text="观看记录自动同步  ·  ${if(autoSync.enabled) "开启" else "关闭"}"
+        }
+        lateinit var syncInterval: TextView
+        syncInterval=setting(device,"同步间隔  ·  ${autoSync.intervalMinutes} 分钟") {
+            val values=AutoProgressSync.intervalOptions
+            tvTools.chooseSelected("观看记录同步间隔",values.map { "$it 分钟" },values.indexOf(autoSync.intervalMinutes),syncInterval) { index ->
+                autoSync.intervalMinutes=values[index]
+                syncInterval.text="同步间隔  ·  ${autoSync.intervalMinutes} 分钟"
+            }
+        }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -936,7 +980,7 @@ class MainActivity: Activity() {
         val license=setting(device,"开源许可") {
             AlertDialog.Builder(this).setTitle("开源许可").setMessage("本应用以 GPL-3.0 发布。\n内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：N3urda/hongguoTV-updates。").setPositiveButton("关闭",null).show()
         }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,seasonButton); val right=listOf(backup,hidden,updates,route,license)
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,seasonButton); val right=listOf(autoSyncButton,syncInterval,backup,hidden,updates,route,license)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
             view.nextFocusUpId=items.getOrNull(index-1)?.id ?: accountEntry.id
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
@@ -1997,6 +2041,7 @@ class MainActivity: Activity() {
             if(screen=="catalog") favoriteMonitor.check()
             if(screen=="player") syncMediaSession()
             resumeAccountSync()
+            historyRecordsLoaded()
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
@@ -2021,6 +2066,7 @@ class MainActivity: Activity() {
     }
     override fun onDestroy() {
         accountRetired=true
+        if(autoProgressSyncDelegate.isInitialized()) autoProgressSyncDelegate.value.close()
         if(progressMergeDelegate.isInitialized()) progressMergeDelegate.value.close()
         accountScreen?.destroy(); accountScreen=null; accountHistorySync.close(); accountIntents.close()
         generation++; cancelWork()
