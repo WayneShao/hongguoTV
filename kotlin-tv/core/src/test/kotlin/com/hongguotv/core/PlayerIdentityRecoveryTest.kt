@@ -146,6 +146,20 @@ class PlayerIdentityRecoveryTest {
         } finally { pool.shutdownNow() }
     }
 
+    @Test fun halfRoundEmptiesAccumulateTowardCandidateRotation() {
+        val store=Store(old.toJson()); var registrations=0
+        val source=PlayerDeviceSource(OkHttpClient(),store={store},recoverEmpty=true,register={registrations++;fresh})
+        fun fail(completeRound: Boolean) { assertThrows(EmptyPlaybackException::class.java) { source.recover<String> { throw EmptyPlaybackException(completeRound) } } }
+        fail(true)
+        fail(false); assertEquals(0,registrations)
+        fail(false); assertEquals(1,registrations)
+        assertEquals(0,store.writes)
+    }
+    @Test fun emptyReasonsSurfaceThroughMessageForFailureLogs() {
+        assertTrue(EmptyPlaybackException().message.orEmpty().contains("[raw_blank]"))
+        assertTrue(EmptyPlaybackException(true, EmptyPlaybackReason.TAB_DATA_EMPTY).message.orEmpty().contains("[tab_data_empty]"))
+        assertTrue(EmptyPlaybackException(false, EmptyPlaybackReason.RAW_BLANK, "routes=1/1 raw_blank=1").message.orEmpty().contains("[routes=1/1 raw_blank=1]"))
+    }
     @Test fun searchStyleRecoveryDoesNotTreatEmptyPlaybackAsRejection() {
         val source=PlayerDeviceSource(OkHttpClient(),store={Store(old.toJson())},register={error("unexpected registration")},cooldownMillis=0)
         assertThrows(EmptyPlaybackException::class.java) { source.recover<String> { throw EmptyPlaybackException() } }

@@ -35,7 +35,8 @@ class ContentRepositoryTest {
     }
     @Test fun emptyBodyDoesNotMasqueradeAsDeviceRejection() {
         val e=assertThrows(IOException::class.java) { repository { "" }.stream("123") }
-        assertEquals("播放接口未返回有效数据，请稍后再试",e.message)
+        assertEquals("播放接口未返回有效数据 [raw_blank]",e.message)
+        assertTrue(e is EmptyPlaybackException && e.reason==EmptyPlaybackReason.RAW_BLANK)
         assertFalse(e is DeviceIdentityRejectedException)
     }
     @Test fun wrongEpisodeIsNeverUsedAsFallback() {
