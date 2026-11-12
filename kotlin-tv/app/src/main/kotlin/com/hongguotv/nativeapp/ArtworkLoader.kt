@@ -13,6 +13,7 @@ import android.view.View
 import android.widget.ImageView
 import okhttp3.Call
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
 import java.lang.ref.WeakReference
 import java.util.PriorityQueue
@@ -29,6 +30,7 @@ class ArtworkLoader(context: Context) {
         const val PRIORITY_VISIBLE = 1
         const val PRIORITY_PREFETCH = 2
         private const val MAX_PENDING = 24
+        private const val MAX_WARM_BYTES = 4 * 1024 * 1024
     }
 
     private data class Key(val url: String, val width: Int, val height: Int)
@@ -160,6 +162,30 @@ class ArtworkLoader(context: Context) {
         }
         detachJob(binding)
         binding.view.clear()
+    }
+
+    /** Disk-only warming on the gradual worker: no bitmap allocation on startup. */
+    internal fun warm(url: String) {
+        if (closed || !url.startsWith("https://") || disk.get(url) != null) return
+        synchronized(signal) { if (jobs.isNotEmpty()) return }
+        com.hongguotv.core.RequestScope.execute(http.newCall(Request.Builder().url(url).build())) { response ->
+            if (!response.isSuccessful) return@execute
+            val body = response.body ?: return@execute
+            if (body.contentLength() > MAX_WARM_BYTES) return@execute
+            val bytes = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            body.byteStream().use { input ->
+                while (true) {
+                    com.hongguotv.core.RequestScope.ensureActive()
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    if (bytes.size() + n > MAX_WARM_BYTES) return@execute
+                    bytes.write(buffer, 0, n)
+                }
+            }
+            com.hongguotv.core.RequestScope.ensureActive()
+            if (bytes.size() > 0) disk.put(url, bytes.toByteArray())
+        }
     }
 
     /** Release every old-page listener and bitmap binding, including queued and in-flight requests. */

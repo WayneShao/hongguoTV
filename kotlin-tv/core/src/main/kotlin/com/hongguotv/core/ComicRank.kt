@@ -12,8 +12,16 @@ internal object ComicRank {
     fun parse(html: String, page: Int): CatalogPage {
         try {
             val document=Jsoup.parse(html)
-            val updatedText=runCatching { ContentRepository.extractRouter(html).optJSONObject("loaderData")
-                ?.optJSONObject("rank_hot-comic-drama/page")?.str("updatedText") }.getOrNull().orEmpty()
+            val route=runCatching { ContentRepository.extractRouter(html).optJSONObject("loaderData")
+                ?.optJSONObject("rank_hot-comic-drama/page") }.getOrNull()
+            val updatedText=route?.str("updatedText").orEmpty()
+            // The resolved router payload is authoritative when present; streamed script payloads
+            // may still carry stale page data right after a background warm request.
+            val payloads=mutableListOf<JSONObject>()
+            route?.optJSONObject("content")?.let {
+                if(route.str("rankKey")!="comic" || route.optInt("pageNum")!=page) throw IOException("漫剧分页信息异常")
+                payloads+=it
+            }
             for(tag in document.select("script[data-fn-name][data-fn-args]")) {
                 val name=tag.attr("data-fn-name")
                 if(name!="r" && name!="mergeLoaderData") continue
@@ -24,6 +32,9 @@ internal object ComicRank {
                         ?.optJSONArray("routerDataFnArgs")?.opt(0)
                 } else null
                 val payload=when(raw) { is JSONObject -> raw; is String -> JSONObject(raw); else -> continue }
+                payloads+=payload
+            }
+            for(payload in payloads) {
                 if(!payload.optBoolean("isSuccess")) throw IOException("漫剧榜单暂不可用")
                 val rows=payload.optJSONArray("rankList") ?: throw IOException("漫剧榜单格式已变化")
                 val pagination=payload.optJSONObject("pagination") ?: throw IOException("漫剧分页信息缺失")

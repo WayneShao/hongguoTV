@@ -75,13 +75,24 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if (httpCode !in setOf(200, 401, 403)) return false
         return Regex("(?i)(device[_ -]?id|iid).*(risk|ban|block|blacklist|invalid|reject|forbidden)|blacklist|风控|设备标识").containsMatchIn(body)
     }
+    private val warmHomes=WarmPageCache<CatalogPage>(20)
+    private val warmRanks=WarmPageCache<CatalogPage>(20)
+    private val warmDetails=WarmPageCache<Detail>(12)
+
+    fun warmHome(page: Int): CatalogPage=fetchHome(page).also { warmHomes.put("home:$page",it) }
+    fun warmComicRanking(page: Int): CatalogPage=ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page).also { warmRanks.put("comic:$page",it) }
+    fun warmDetail(id: String) { warmDetails.put(id,fetchDetail(id)) }
+
     fun comicRanking(page: Int = 1): CatalogPage {
         require(page in 1..100)
-        return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
+        return warmRanks.take("comic:$page") ?: ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
     }
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
-        require(page in 1..100)
         if(type==ContentType.COMIC) return comicRanking(page)
+        return warmHomes.take("home:$page") ?: fetchHome(page)
+    }
+    private fun fetchHome(page: Int): CatalogPage {
+        require(page in 1..100)
         val data=router("$site/category?tab=1&sort_type=1"+if(page>1) "&page=$page" else "")
         val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("首页数据结构已变化")
         val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
@@ -302,7 +313,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         throw IOException("相关作品暂时无法加载，请重试", failure)
     }
 
-    fun detail(id: String): Detail {
+    fun detail(id: String): Detail = warmDetails.take(id) ?: fetchDetail(id)
+
+    private fun fetchDetail(id: String): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
         val o=router("$site/detail?series_id=$id").optJSONObject("detail_page")?.optJSONObject("seriesDetail") ?: throw IOException("剧集详情暂不可用")
         val raw=o.optJSONArray("vid_list") ?: throw IOException("分集暂不可用")
