@@ -314,6 +314,27 @@ class MainActivity: Activity() {
     private var requestedAutoplay=true
     private var retryAutoplay=true
     private var foreground=false
+    private var gradualPreloader: GradualPreloader?=null
+
+    /** Idle catalog time warms the next pages, posters and details one bounded request at a time. */
+    private fun startGradualPreloading() {
+        if (gradualPreloader!=null) return
+        val warmer=GradualPreloader(allowed={
+            foreground && library.isLoaded && screen=="catalog" && !tvTools.showing
+        })
+        gradualPreloader=warmer
+        fun extra(rows: List<Series>) {
+            main.post {
+                rows.take(6).forEach { item -> warmer.enqueue("cover:${item.id}") { artwork.warm(item.cover) } }
+                rows.take(2).forEach { item -> warmer.enqueue("detail:${item.id}") { repository.warmDetail(item.id) } }
+            }
+        }
+        warmer.enqueue("home:1") { extra(repository.warmHome(1).items) }
+        warmer.enqueue("comic:1") { extra(repository.warmComicRanking(1).items) }
+        for (page in 2..5) warmer.enqueue("home:$page") { repository.warmHome(page) }
+        for (page in 2..5) warmer.enqueue("comic:$page") { repository.warmComicRanking(page) }
+        warmer.resume()
+    }
     private lateinit var connectivity: ConnectivityManager
     private var networkRegistered=false
     private val networkCallback=object: ConnectivityManager.NetworkCallback() {
@@ -2034,7 +2055,12 @@ class MainActivity: Activity() {
     }
     @Deprecated("TV remote back is handled through the activity")
     override fun onBackPressed()=goBack()
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        gradualPreloader?.yieldToUser()
+    }
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if(event.action==KeyEvent.ACTION_DOWN) gradualPreloader?.yieldToUser()
         if(screen=="player") {
             val key=event.keyCode
             if(key==KeyEvent.KEYCODE_BACK) { if(event.action==KeyEvent.ACTION_UP) goBack(); return true }
@@ -2078,7 +2104,7 @@ class MainActivity: Activity() {
         }
     }
     override fun onResume() {
-        super.onResume(); foreground=true; main.removeCallbacks(tick); main.post(tick)
+        super.onResume(); foreground=true; startGradualPreloading(); gradualPreloader?.resume(); main.removeCallbacks(tick); main.post(tick)
         updater.resume()
         if(library.isLoaded) {
             if(screen=="account") showAccount()
@@ -2101,6 +2127,7 @@ class MainActivity: Activity() {
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
+        gradualPreloader?.pause()
         stallGuard.suspendObservation()
         cancelNextSeason()
         abandonSeasonContinuation()
@@ -2118,10 +2145,12 @@ class MainActivity: Activity() {
     }
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) gradualPreloader?.pause()
         if(::artwork.isInitialized) artwork.trimMemory(level)
         if(level>=android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) cancelPrefetch()
     }
     override fun onDestroy() {
+        gradualPreloader?.close()
         accountRetired=true
         if(autoProgressSyncDelegate.isInitialized()) autoProgressSyncDelegate.value.close()
         if(progressMergeDelegate.isInitialized()) progressMergeDelegate.value.close()

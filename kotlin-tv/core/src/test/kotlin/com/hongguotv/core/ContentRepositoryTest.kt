@@ -112,6 +112,36 @@ class ContentRepositoryTest {
         .put("rank_hot-comic-drama/page").put(JSONArray().put(JSONObject().put("key","content")
             .put("routerDataFnName","p").put("routerDataFnArgs",JSONArray().put(payload.toString())))))
 
+    @Test fun warmedRankPageIsConsumedOnceAndRouteContentWinsOverStaleScripts() {
+        val route=JSONObject().put("rankKey","comic").put("pageNum",1)
+            .put("updatedText","今日已更新").put("content",rankPayload(1,5))
+        val html="""<script>_ROUTER_DATA="""+JSONObject().put("loaderData",
+            JSONObject().put("rank_hot-comic-drama/page",route))+""";</script>"""+script("r",JSONArray()
+            .put("rank_hot-comic-drama/page").put("content").put(JSONObject().put("isSuccess",false)))
+        var calls=0
+        val repo=repository { calls++; html }
+        repo.warmComicRanking(1)
+        val result=repo.comicRanking(1)
+        assertEquals(1,calls)
+        assertEquals("123",result.items.single().id)
+        assertEquals(5,result.ranking!!.totalPages)
+        assertTrue(result.hasMore)
+        repo.comicRanking(1)
+        assertEquals(2,calls)
+        assertThrows(IOException::class.java) { repo.comicRanking(2) }
+    }
+
+    @Test fun warmedHomeIsConsumedOnceThenRefetched() {
+        var calls=0
+        val repo=repository { calls++;
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"recommendList":[{"series_id":"456","series_name":"测试短剧"}],"pagination":{"totalPages":1}}}};</script>"""}
+        repo.warmHome(1)
+        assertEquals("测试短剧",repo.home(1).items.single().title)
+        assertEquals(1,calls)
+        repo.home(1)
+        assertEquals(2,calls)
+    }
+
     @Test fun comicRankingPreservesSourceRankHeatAndUpdateRatherThanRenumbering() {
         val payload=rankPayload(2,5)
         payload.getJSONArray("rankList").getJSONObject(0).put("rank",23).put("heatText","5746万热度")
