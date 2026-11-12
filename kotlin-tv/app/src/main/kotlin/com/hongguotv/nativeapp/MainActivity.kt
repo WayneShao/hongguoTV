@@ -1789,7 +1789,7 @@ class MainActivity: Activity() {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
             autoRecovery=true; scheduleRecovery()
         }
-        android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else ""))
+        android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else (problem.message?.let { " $it" } ?: "")))
         controls.addView(text(com.hongguotv.core.PlaybackDiagnostics.line(problem,android.os.Build.MODEL,
             android.os.Build.VERSION.RELEASE,android.os.Build.VERSION.SDK_INT,BuildConfig.VERSION_NAME,decoding,recovery.attempts),12f,muted))
     }

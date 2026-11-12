@@ -279,13 +279,13 @@ class ContentRepositoryPlayerTest {
                 else -> ""
             }
         }
-        // 第 1 次：完整探测两条 POST 线路，计一次完整空轮次，尚不换身份。
+        // 第 1 次：完整探测两条 POST 线路，计 2 分（一个完整空轮），尚不换身份。
         assertThrows(IOException::class.java) { repo.stream("123", 720) }
         assertEquals(0, registrations)
-        // 第 2 次紧接发生：线路仍在冷却，只探测一条，属于半轮，不累计也不清零。
+        // 第 2 次紧接发生：线路仍在冷却，只探测一条，属于半轮折半计 1 分（累计 3 分），仍不换身份。
         assertThrows(IOException::class.java) { repo.stream("123", 720) }
         assertEquals(0, registrations)
-        // 冷却结束后再次完整探测，累计到第二次完整空轮次才换身份。
+        // 冷却结束后再次完整探测，累计满 4 分（两个完整空轮等价）才换身份。
         now = PlaybackRoutes.EMPTY_COOLDOWN_MILLIS * 2
         assertThrows(IOException::class.java) { repo.stream("123", 720) }
         assertEquals("候选身份播放失败时不得覆盖已保存身份", 1, registrations)
@@ -315,7 +315,7 @@ class ContentRepositoryPlayerTest {
         assertEquals(0,registrations)
         val firstRoundCalls=modelCalls
         assertTrue(firstRoundCalls<=8)
-        // 冷却跳过的半轮不算完整空轮次；冷却结束后再完整探测一轮才换身份。
+        // 冷却结束后的完整空轮补足累计分，达到阈值即换身份并由候选恢复。
         now=PlaybackRoutes.EMPTY_COOLDOWN_MILLIS*2
         assertEquals("https://example.com/recovered",repo.stream("123",720).url)
         assertEquals(1,registrations)

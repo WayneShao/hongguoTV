@@ -33,7 +33,8 @@ internal class PlayerDeviceSource(
     private class RecoveryState {
         val lock = java.util.concurrent.locks.ReentrantLock()
         var lastAttempt: Long? = null
-        var emptyRounds = 0
+        /** 完整空轮记 2 分，冷却半轮记 1 分；满 4 分（约两个完整轮）才轮换候选。 */
+        var emptyPoints = 0
         var attemptedInFailurePeriod = false
         var epoch = 0L
     }
@@ -49,13 +50,13 @@ internal class PlayerDeviceSource(
         return try { block(active).also {
             RequestScope.ensureActive()
             synchronized(state) {
-                if(state.epoch==epoch) { state.emptyRounds=0; state.attemptedInFailurePeriod=false; state.epoch++ }
+                if(state.epoch==epoch) { state.emptyPoints=0; state.attemptedInFailurePeriod=false; state.epoch++ }
             }
         } } catch (failure: Exception) {
             RequestScope.ensureActive()
             val emptyFailure = (failure as? EmptyPlaybackException)?.takeIf { recoverEmpty }
             if (failure !is DeviceRejectedException && emptyFailure == null) {
-                synchronized(state) { if(state.epoch==epoch) state.emptyRounds=0 }
+                synchronized(state) { if(state.epoch==epoch) state.emptyPoints=0 }
                 throw failure
             }
             try {
@@ -77,9 +78,10 @@ internal class PlayerDeviceSource(
                 synchronized(state) {
                     if(state.epoch!=epoch) throw failure
                     if(emptyFailure != null) {
-                        // 冷却跳过的半轮探测既不能累计，也不能把已有空轮次清零。
-                        if(!emptyFailure.completeRound) throw failure
-                        if(++state.emptyRounds<2) throw failure
+                        // 半轮空虽只探到一条线路，持续出现同样说明当前身份拿不到数据；折半计入，
+                        // 否则自动重试全程约 8.5 秒、远短于 30 秒线路冷却，候选轮换会被永远饿死。
+                        state.emptyPoints += if(emptyFailure.completeRound) 2 else 1
+                        if(state.emptyPoints < 4) throw failure
                     }
                     if(emptyFailure != null && state.attemptedInFailurePeriod) throw failure
                     val now = monotonicMillis()
@@ -92,7 +94,7 @@ internal class PlayerDeviceSource(
                 block(candidate).also {
                     RequestScope.ensureActive()
                     store()?.save(candidate.toJson())
-                    synchronized(state) { state.emptyRounds=0; state.attemptedInFailurePeriod=false; state.epoch++ }
+                    synchronized(state) { state.emptyPoints=0; state.attemptedInFailurePeriod=false; state.epoch++ }
                 }
             } finally { state.lock.unlock() }
         }

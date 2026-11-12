@@ -343,6 +343,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         var rejected = false
         var sawResponse = false
         val emptyRoutes = mutableSetOf<Int>()
+        val emptyReasons = mutableMapOf<Int, EmptyPlaybackReason>()
         var transportFailure: Exception? = null
         var terminalFailure: Exception? = null
         var incompatibleModel=false
@@ -365,12 +366,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 if(!data.has("data")) throw PlaybackModelException("播放响应缺少 data")
                 val payload = data.optJSONObject("data")
                 if (payload == null && !data.isNull("data")) throw PlaybackModelException("播放数据格式异常")
-                if (payload == null || payload.length() == 0) { emptyRoutes.add(routeId); routes.failed(routeId, routeNow(), true); continue }
+                if (payload == null || payload.length() == 0) { emptyRoutes.add(routeId); emptyReasons[routeId] = EmptyPlaybackReason.DATA_EMPTY; routes.failed(routeId, routeNow(), true); continue }
                 // 直连模型只属于稳定的 0 号线路，不能按当前排序位置判断。
                 val models = StreamModels.models(payload, id, allowDirect = routeId == PlaybackRoutes.SHORTPLAY)
                 if (models.isEmpty()) {
                     val entry = payload.optJSONObject(id) ?: if (routeId == PlaybackRoutes.SHORTPLAY && payload.has("video_model")) payload else null
-                    if (entry != null && entry.has("video_model") && (entry.isNull("video_model") || entry.opt("video_model") == "")) { emptyRoutes.add(routeId); routes.failed(routeId, routeNow(), true); continue }
+                    if (entry != null && entry.has("video_model") && (entry.isNull("video_model") || entry.opt("video_model") == "")) { emptyRoutes.add(routeId); emptyReasons[routeId] = EmptyPlaybackReason.VIDEO_MODEL_EMPTY; routes.failed(routeId, routeNow(), true); continue }
                     throw PlaybackModelException("播放模型缺失或分集不匹配")
                 }
                 for (model in models) {
@@ -380,7 +381,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                     if(rows.size==countBefore && (model.optJSONObject("video_list")?.length() ?: model.optJSONArray("video_list")?.length() ?: 0)>0) incompatibleModel=true
                     if (rows.any { it.quality == maxQuality }) { routes.success(routeId, routeNow()); return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows) }
                     val fallbackUrl = StreamModels.fallbackApiUrl(model)
-                    if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) emptyRoutes.add(routeId)
+                    if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) { emptyRoutes.add(routeId); emptyReasons.putIfAbsent(routeId, EmptyPlaybackReason.LIST_EMPTY) }
                     if (fallbackUrl.startsWith("https://")) runCatching {
                         val info = fallbackInfo(fallbackUrl)
                         rows += StreamModels.listRows(info?.optJSONObject("video_list"), info?.str("key_seed")?.takeIf { it.isNotEmpty() }?.let(StreamModels::lenientB64))
@@ -390,7 +391,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 // 有响应且非空即为线路健康；清晰度不匹配属于模型问题，不降级线路。
                 if (routeId in emptyRoutes) routes.failed(routeId, routeNow(), true) else routes.success(routeId, routeNow())
             } catch (e: DeviceRejectedException) { rejected = true }
-            catch (e: EmptyPlaybackException) { emptyRoutes.add(routeId); routes.failed(routeId, routeNow(), true) }
+            catch (e: EmptyPlaybackException) { emptyRoutes.add(routeId); emptyReasons.putIfAbsent(routeId, e.reason); routes.failed(routeId, routeNow(), true) }
             catch (e: Exception) {
                 RequestScope.ensureActive()
                 if(e is PlaybackBudgetExceededException || e is PlaybackDeadlineException) throw e
@@ -403,11 +404,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 if (incompatibleModel) throw NoCompatibleStreamException()
                 if (rejected) throw DeviceRejectedException("播放设备已被上游拒绝")
                 if (transportFailure != null) throw transportFailure
-                // 只有完整探测了全部 POST 线路的空结果才算完整空轮次；冷却跳过的半轮只报空，不推动换身份。
+                // 空结果子情形要写进失败日志：空体指向网关层，code=0 无数据指向服务端软空。
                 val probedEveryRoute = plan.complete && emptyRoutes.size == requests.size
                 if (emptyRoutes.isNotEmpty() && emptyRoutes.size == plan.routes.size) {
                     if (probedEveryRoute && PlaybackRequestBudget.current.get()?.claimTabFallback()==true) return tabStream(id,maxQuality,device)
-                    throw EmptyPlaybackException(probedEveryRoute)
+                    val counts = emptyReasons.values.groupingBy { it }.eachCount()
+                    val dominant = counts.entries.sortedWith(compareByDescending<Map.Entry<EmptyPlaybackReason, Int>> { it.value }.thenBy { it.key.ordinal }).first().key
+                    val detail = "routes=${emptyRoutes.size}/${plan.routes.size} " + counts.entries.sortedBy { it.key.ordinal }.joinToString(" ") { "${it.key.code}=${it.value}" }
+                    throw EmptyPlaybackException(probedEveryRoute, dominant, detail)
                 }
                 if (!sawResponse) throw IOException("播放接口暂不可用")
                 throw NoCompatibleStreamException()
@@ -430,18 +434,18 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             put("User-Agent",VendorConstants.VIDEO_UA);put("Accept","application/json; charset=utf-8")
         }
         val raw=fetch(url,headers,null)
-        if(raw.isBlank()) throw EmptyPlaybackException()
+        if(raw.isBlank()) throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_RAW_BLANK)
         val data=playerJson(raw)
         val code=(if(data.has("code")) data.opt("code") else data.opt("Code"))?.toString()?.toIntOrNull()
             ?: throw PlaybackModelException("备用播放状态格式异常")
         if(code!=0) throw IOException("备用播放接口暂不可用")
         val payload=data.optJSONObject("data") ?: throw PlaybackModelException("备用播放数据格式异常")
-        if(payload.length()==0) throw EmptyPlaybackException()
+        if(payload.length()==0) throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_DATA_EMPTY)
         val map=payload.optJSONObject("video_model_data") ?: payload
         val models=StreamModels.models(map,id,false)
         if(models.isEmpty()) throw PlaybackModelException("备用播放模型缺失或分集不匹配")
         val rows=models.flatMap { StreamModels.listRows(it.optJSONObject("video_list"),StreamModels.keySeed(it))+StreamModels.arrayRows(it.optJSONArray("video_list")) }
-        if(models.all { it.length()==0 || ((it.optJSONObject("video_list")?.length() ?: it.optJSONArray("video_list")?.length() ?: -1)==0 && StreamModels.fallbackApiUrl(it).isEmpty()) }) throw EmptyPlaybackException()
+        if(models.all { it.length()==0 || ((it.optJSONObject("video_list")?.length() ?: it.optJSONArray("video_list")?.length() ?: -1)==0 && StreamModels.fallbackApiUrl(it).isEmpty()) }) throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_LIST_EMPTY)
         val selected=StreamModels.pick(rows,maxQuality) ?: throw NoCompatibleStreamException()
         return streamInfo(selected,maxQuality,rows)
     }
@@ -509,7 +513,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
         val entry=map.optJSONObject(id) ?: throw IOException("播放信息为空")
         val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
-        val raw=model.opt("fallback_api") ?: throw EmptyPlaybackException()
+        val raw=model.opt("fallback_api") ?: throw EmptyPlaybackException(reason = EmptyPlaybackReason.NO_FALLBACK_API)
         val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
         if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
         val info=fallbackInfo(fallback,VendorConstants.VIDEO_UA)
