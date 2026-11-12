@@ -28,6 +28,7 @@ internal class AccountScreen(
     private val openCaptured: ((Series, AccountHistoryItem?, String, AccountContext) -> Unit)? = null,
     private val mergeFavorites: ((List<Series>, AccountContext, Long) -> Unit)? = null,
     private val mergeProgress: ((AccountContext, (String) -> Unit) -> Boolean)? = null,
+    private val loadCover: (ImageView, String) -> Unit = { _, _ -> },
 ) {
     private val main=Handler(Looper.getMainLooper())
     private val worker=Executors.newSingleThreadExecutor()
@@ -55,6 +56,24 @@ internal class AccountScreen(
         it.id=View.generateViewId(); target.addView(it,LinearLayout.LayoutParams(-1,-2).apply { bottomMargin=dp(5) })
         val count=target.childCount
         if(count>1) { val previous=target.getChildAt(count-2); if(previous.isFocusable) { previous.nextFocusDownId=it.id; it.nextFocusUpId=previous.id } }
+    }
+    /** Cloud list rows carry a poster; the button itself stays the focus and click target. */
+    private fun posterRow(target: LinearLayout,cover: String,title: String,click: ()->Unit): View {
+        val line=LinearLayout(activity).apply { orientation=LinearLayout.HORIZONTAL; gravity=android.view.Gravity.CENTER_VERTICAL }
+        val poster=ImageView(activity).apply { scaleType=ImageView.ScaleType.CENTER_CROP }
+        line.addView(poster,LinearLayout.LayoutParams(dp(54),dp(72)).apply { rightMargin=dp(10) })
+        loadCover(poster,cover)
+        val entry=button(title,click)
+        entry.id=View.generateViewId()
+        line.addView(entry,LinearLayout.LayoutParams(0,-2).apply { weight=1f })
+        target.addView(line,LinearLayout.LayoutParams(-1,-2).apply { bottomMargin=dp(5) })
+        val count=target.childCount
+        if(count>1) {
+            val previous=target.getChildAt(count-2)
+            val previousButton=if(previous is LinearLayout) previous.getChildAt(minOf(1,previous.childCount-1)) else previous
+            if(previousButton.isFocusable) { previousButton.nextFocusDownId=entry.id; entry.nextFocusUpId=previousButton.id }
+        }
+        return entry
     }
     fun show(host: LinearLayout,section: String?=null,focusSeries: String?=null) { close(); parent=host; if(section==null) render() else listing(section,focusSeries) }
     private fun reset(): LinearLayout {
@@ -324,10 +343,10 @@ internal class AccountScreen(
                     val progress=result.history.firstOrNull { it.series.id==series.id }
                     val reservation=result.reservations.firstOrNull { it.series.id==series.id }
                     val suffix=progress?.let { " · 第 ${it.episodeIndex+1} 集" } ?: if(series.preview) " · 待上线" else ""
-                    action(rows,series.title+suffix) {
-                        if(ticket!=revision || page!="list" || !current(context,pullRevision)) return@action
-                        if(kind=="history" && intents?.suppressHistory(context,series.id)==true) return@action
-                        if(kind=="favorites" && intents?.suppressFavorite(context,series.id)==true) return@action
+                    posterRow(rows,series.cover,series.title+suffix) {
+                        if(ticket!=revision || page!="list" || !current(context,pullRevision)) return@posterRow
+                        if(kind=="history" && intents?.suppressHistory(context,series.id)==true) return@posterRow
+                        if(kind=="favorites" && intents?.suppressFavorite(context,series.id)==true) return@posterRow
                         if(series.preview || reservation?.online==false) reservationActions(series,reservation,context,pullRevision)
                         else if(openCaptured!=null) openCaptured.invoke(series,progress,kind,context)
                         else open(series,progress,kind)

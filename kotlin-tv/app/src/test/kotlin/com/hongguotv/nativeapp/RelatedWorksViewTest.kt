@@ -105,7 +105,9 @@ class RelatedWorksViewTest {
             val dialog = requireNotNull(ShadowAlertDialog.getLatestAlertDialog())
             val grid = descendants(dialog.window!!.decorView).filterIsInstance<GridLayout>().single()
             assertEquals(40, grid.childCount)
-            texts(dialog.window!!.decorView).single { it.text.toString().startsWith("长剧第40季\n") }.performClick()
+            assertEquals(40, descendants(dialog.window!!.decorView).filter { it.tag?.toString()?.startsWith("all-") == true }
+                .sumOf { descendants(it).filterIsInstance<android.widget.ImageView>().size })
+            descendants(dialog.window!!.decorView).single { it.tag == "all-40" }.performClick()
             assertEquals("40", selected?.series?.id)
             assertFalse(dialog.isShowing)
 

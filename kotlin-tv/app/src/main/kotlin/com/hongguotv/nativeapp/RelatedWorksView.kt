@@ -190,20 +190,34 @@ internal class RelatedWorksView(
             }
         }.apply { columnCount = columns }
         val cells = rows.map { work ->
-            label(work.series.title + "\n" + work.label, 13f).apply {
+            LinearLayout(context).apply {
+                orientation = VERTICAL
                 id = View.generateViewId()
                 isFocusable = true
                 isFocusableInTouchMode = true
-                maxLines = 3
-                ellipsize = TextUtils.TruncateAt.END
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(10), dp(6), dp(10), dp(6))
+                setPadding(dp(6), dp(6), dp(6), dp(6))
                 background = TvStyle.card(context, false)
                 contentDescription = work.series.title + "，" + work.label
-                setOnFocusChangeListener { v, focused -> v.background = TvStyle.card(context, focused) }
+                tag = "all-${work.series.id}"
+                val poster = ImageView(context).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }
+                addView(poster, LayoutParams(-1, dp(164)))
+                loadCover(poster, work.series.cover)
+                addView(label(work.series.title, 13f).apply {
+                    maxLines = 2
+                    minLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                })
+                addView(label(if (work.upcoming) reserveLabel(work) else work.label, 12f))
+                setOnFocusChangeListener { v, focused ->
+                    v.background = TvStyle.card(context, focused)
+                    if (focused) loadCover(poster, work.series.cover)
+                }
                 setOnClickListener { allDialog?.dismiss(); open(work, anchor) }
             }.also { cell -> grid.addView(cell, GridLayout.LayoutParams().apply {
-                width = dp(148); height = dp(76)
+                width = dp(148); height = -2
                 setMargins(dp(4), dp(4), dp(4), dp(4))
             }) }
         }
@@ -215,7 +229,7 @@ internal class RelatedWorksView(
         }
         // RayNeoDialogs wraps the content view, so the grid needs an explicit height to scroll.
         val rowsCount = (cells.size + columns - 1) / columns
-        val gridHeight = minOf(dp(420), (rowsCount * (dp(76) + dp(8))).coerceAtLeast(dp(76)))
+        val gridHeight = minOf(dp(420), (rowsCount * (dp(230) + dp(8))).coerceAtLeast(dp(230)))
         panel.addView(ScrollView(context).apply {
             isVerticalScrollBarEnabled = false
             addView(grid)
