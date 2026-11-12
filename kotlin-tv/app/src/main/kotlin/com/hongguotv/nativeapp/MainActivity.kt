@@ -360,6 +360,7 @@ class MainActivity: Activity() {
     private var player: ExoPlayer?=null
     private var video: RemoteVideo?=null
     private var playbackReady=false
+    private var waitingForFirstFrame=true
     private var pausedForLifecycle=false
     private lateinit var hud: LinearLayout
     private lateinit var playbackText: TextView
@@ -375,6 +376,7 @@ class MainActivity: Activity() {
     private var recoveryReason=""
     private var quality=""
     private val bufferingWatchdog=BufferingWatchdog()
+    private val stallGuard=PlaybackStallGuard()
     private val tick=object: Runnable {
         override fun run() {
             if(!foreground || isDestroyed) return
@@ -392,8 +394,18 @@ class MainActivity: Activity() {
                 maybePrepareSeason()
                 updateSeasonBanner()
                 val now=android.os.SystemClock.elapsedRealtime()
+                player?.let { p ->
+                    val frames=p.videoDecoderCounters?.renderedOutputBufferCount
+                    if(stallGuard.offer(
+                        episodeId=detail?.episodes?.getOrNull(episodeIndex).orEmpty(),
+                        now=now,
+                        frames=frames,
+                        eligible=playbackReady && !waitingForFirstFrame && !playError && pendingSeek==null && p.isPlaying && hasWindowFocus() && p.playbackState==Player.STATE_READY && p.totalBufferedDuration>=5000
+                    )) { video?.cancelReads(); playerFailure(java.net.SocketTimeoutException("视频解码停滞超过 20 秒")) }
+                }
                 if(player?.isPlaying==true && now-lastSaved>5000) { saveProgress(); lastSaved=now }
             }
+            if(screen!="player") stallGuard.suspendObservation()
             main.postDelayed(this,1000)
         }
     }
@@ -1275,7 +1287,7 @@ class MainActivity: Activity() {
         if(recovering && index==episodeIndex && video?.reusable==true && player!=null) {
             cancelRecovery(); bufferingWatchdog.reset()
             player?.stop(); video?.cancelReads()
-            playError=false; playbackReady=false; readySince=0
+            playError=false; playbackReady=false; readySince=0; waitingForFirstFrame=true
             startPosition=position; requestedAutoplay=autoplay; pausedForLifecycle=!autoplay
             controls.removeAllViews(); progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
             player?.seekTo(position); player?.prepare(); player?.playWhenReady=foreground && autoplay
@@ -1310,7 +1322,7 @@ class MainActivity: Activity() {
         autoRecovery=false; readySince=0; startPosition=position.coerceAtLeast(0); requestedAutoplay=autoplay
         if(autoplay) sleepStopped=false
         screen="player"; episodeIndex=selectedIndex; group=episodeIndex/20
-        panel=false; playError=false; playbackReady=false; quality=""; pausedForLifecycle=!autoplay
+        panel=false; playError=false; playbackReady=false; waitingForFirstFrame=true; quality=""; pausedForLifecycle=!autoplay
         player?.playWhenReady=requestedAutoplay
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if(!reuse) {
@@ -1379,7 +1391,7 @@ class MainActivity: Activity() {
                 }
                 override fun onRenderedFirstFrame() {
                     if(active() && firstFrame) {
-                        firstFrame=false
+                        firstFrame=false; waitingForFirstFrame=false
                         if(!p.playWhenReady || !foreground) measurement.interrupted(android.os.SystemClock.elapsedRealtime())
                         measurement.firstFrame(android.os.SystemClock.elapsedRealtime())
                         android.util.Log.i("HongguoTV","Playback first frame episode=${episodeIndex+1} preloaded=${prefetched!=null} reused=$reuse elapsedMs=${android.os.SystemClock.elapsedRealtime()-playbackStarted}")
@@ -2045,6 +2057,7 @@ class MainActivity: Activity() {
         } else libraryLoadError?.let(::showLibraryError)
     }
     override fun onPause() {
+        stallGuard.suspendObservation()
         cancelNextSeason()
         abandonSeasonContinuation()
         bufferingWatchdog.reset()
