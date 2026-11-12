@@ -211,7 +211,7 @@ class MainActivity: Activity() {
         val controller=AccountScreen(this,accountRepository,{ title,action -> button(title,onClick=action) },
             { accountReturn=false; tab=5; showCatalog() },::accountChanged,
             { _,_,_ -> },intents=accountIntents,openCaptured=::openAccountSelection,mergeFavorites=::mergeAccountFavorites,
-            mergeProgress=::startProgressMerge)
+            mergeProgress=::startProgressMerge,loadCover=::loadCover)
         accountScreen=controller; controller.show(host,section,focusSeries)
     }
 
@@ -256,6 +256,9 @@ class MainActivity: Activity() {
     private var seasonLookup: RequestScope?=null
     private var relatedSection: RelatedWorksView?=null
     private var relatedLoadTicket=0
+    private var producerDialog: ProducerWorksDialog?=null
+    private var producerButton: TextView?=null
+    private var producer: Producer?=null
     private val relatedReservations=mutableMapOf<String,AccountReservation>()
     private var relatedReserveTicket=0
     private var libraryLoadError: Throwable?=null
@@ -499,6 +502,8 @@ class MainActivity: Activity() {
         generation++; cancelWork(); artwork.cancelPage()
     }
     private fun releaseCatalogViews() {
+        producerDialog?.close(); producerDialog=null
+        producerButton=null
         homeScreen?.let { homePosition=it.capturePosition() }
         catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
         catalogBody=null
@@ -1146,7 +1151,23 @@ class MainActivity: Activity() {
         val description=data.series.description.ifBlank { "选择剧集开始观看" }
         val synopsis=text(description,15f,muted).apply { maxLines=if(synopsisExpanded) 20 else 2; ellipsize=TextUtils.TruncateAt.END }
         info.addView(synopsis)
-        val actions=row(); actions.setPadding(0,dp(12),0,0); info.addView(actions)
+        producer=null
+        var retryProducer: ()->Unit = {}
+        lateinit var productionButton: TextView
+        productionButton=addButton(info,"制作方 · 正在读取…") {
+            val known=producer
+            if(known==null) retryProducer()
+            else {
+                producerDialog?.close()
+                producerDialog=ProducerWorksDialog(this,repository,known,data.series,productionButton,::loadCover) { target ->
+                    if(target.id!=data.series.id) openDetail(target)
+                }
+            }
+        }
+        productionButton.textSize=13f
+        productionButton.isEnabled=false
+        producerButton=productionButton
+        val actions=row(); actions.setPadding(0,dp(12),0,0); info.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(actions) },lp(-1,-2))
         val historyUsable=detailLocalSelection || playbackHistoryAllowed(data.series.id,playbackRevision)
         val staleHistorySelection=!detailLocalSelection && accountReturnSection=="history" && !historyUsable
         val progress=if(historyUsable) detailProgress(data.series.id) else null
@@ -1180,6 +1201,10 @@ class MainActivity: Activity() {
             synopsisButton.text=if(synopsisExpanded) "收起简介" else "完整简介"
             synopsisButton.post { synopsisButton.requestRectangleOnScreen(android.graphics.Rect(0,0,synopsisButton.width,synopsisButton.height),false) }
         }
+        productionButton.nextFocusDownId=play.id
+        play.nextFocusUpId=productionButton.id
+        favorite.nextFocusUpId=productionButton.id
+        synopsisButton.nextFocusUpId=productionButton.id
         content.addView(hero)
         val groupRow=row(); groupRow.setPadding(0,dp(3),0,dp(5))
         val maxGroup=data.episodes.lastIndex/20; group=group.coerceIn(0,maxGroup)
@@ -1213,16 +1238,35 @@ class MainActivity: Activity() {
         related=RelatedWorksView(this,episodes,::loadCover,::relatedReservationLabel,::openRelated) { loadRelated(data,related) }
         content.addView(related,lp(-1,-2))
         relatedSection=related
+        retryProducer={ loadRelated(data,related,true) }
         loadRelated(data,related)
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
     }
-    private fun loadRelated(data: Detail,section: RelatedWorksView) {
+    private fun loadRelated(data: Detail,section: RelatedWorksView,force: Boolean=false) {
         section.loading()
         val ticket=++relatedLoadTicket
-        work({ repository.related(data.series.id) }, { rows ->
-            if(ticket==relatedLoadTicket && detail?.series?.id==data.series.id && relatedSection===section)
-                section.show(RelatedWorks.ordered(data.series,rows))
-        }, { if(ticket==relatedLoadTicket && detail?.series?.id==data.series.id && relatedSection===section) section.failed() })
+        work({
+            val related=runCatching { repository.related(data.series.id,force) }
+            if(Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException()
+            related to runCatching { repository.producer(data.series.id) }
+        }, { results ->
+            if(ticket==relatedLoadTicket && detail?.series?.id==data.series.id && relatedSection===section) {
+                val (rows,credit)=results
+                rows.fold({ section.show(RelatedWorks.ordered(data.series,it)) },{ section.failed() })
+                credit.fold({ found ->
+                    producer=found
+                    producerButton?.text=found?.let { "制作方：${it.name} · 查看作品 ›" } ?: "制作方：暂无资料"
+                    producerButton?.isEnabled=found!=null
+                },{
+                    producerButton?.text="制作方资料读取失败 · 重试"; producerButton?.isEnabled=true
+                })
+            }
+        }, {
+            if(ticket==relatedLoadTicket && detail?.series?.id==data.series.id && relatedSection===section) {
+                section.failed()
+                producerButton?.text="制作方资料读取失败 · 重试"; producerButton?.isEnabled=true
+            }
+        })
         if(accountRepository.captureAccount()!=null) loadReservations() else relatedReservations.clear()
     }
     private fun loadReservations() {
