@@ -370,8 +370,16 @@ class MainActivity: Activity() {
     private var catalogFocus=""
     private data class CatalogState(val page: Int,val items: List<Series>,val hasMore: Boolean,val ranking: ComicRanking?)
     private var ranking: ComicRanking?=null
-    private var rankRefresh: View?=null
-    private var rankSubtitle: TextView?=null
+    private val rank=RankBrowserState()
+    private val rankRequests=RankRequests(rank)
+    private val rankScopes=mutableMapOf<RankBoard,RequestScope>()
+    private var rankView: RankingView?=null
+    private var rankScroll=0
+    private var rankFocus=""
+    private var rankEpoch=0
+    private val discovery=DiscoveryController()
+    private var discoveryView: DiscoveryView?=null
+    private var detailOrigin=""
     private val tabState=mutableMapOf<Int,CatalogState>()
     private val tabFocus=mutableMapOf<Int,String>()
     private val nav=mutableListOf<View>()
@@ -533,7 +541,9 @@ class MainActivity: Activity() {
         catalogBody=null
         homeScreen=null; selectionPreview=null; catalogScroll=null
         nav.clear(); typeButtons.clear(); searchInput=null; searchButton=null; searchActions.clear()
-        historyManage=null; rankRefresh=null; rankSubtitle=null; collectionBack=null; favoriteBadges.clear()
+        historyManage=null; collectionBack=null; favoriteBadges.clear()
+        rankView?.let { view -> val saved=view.capture(); rankScroll=saved.first; rankFocus=saved.second; rankView=null }
+        discoveryView?.let { view -> view.capture(); view.cancel(); discoveryView=null }
         favoriteStatus=null; favoriteCheck=null; homeUpdates=null; resumeCards.clear()
         catalogCards.clear(); cardImages.clear()
     }
@@ -568,7 +578,7 @@ class MainActivity: Activity() {
         leaveCollection()
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
-        showCatalog(load=(next<=2 && catalog.isEmpty() && (next!=1 || query.isNotBlank())))
+        showCatalog(load=(next<=1 && catalog.isEmpty() && (next!=1 || query.isNotBlank())))
     }
     private fun switchContentType(type: ContentType) {
         if(library.contentType==type) return
@@ -625,6 +635,15 @@ class MainActivity: Activity() {
         }
         container.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(top) },lp(-1,-2))
         container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
+        detailOrigin=""
+        if(tab==2) {
+            val view=RankingView(this,rank,::loadCover,{ item,_ -> openDetail(item) },::fetchRank,rankScroll,rankFocus,nav[tab].id)
+            rankView=view; rankScroll=0; rankFocus=""
+            container.addView(view,lp(-1,0).apply { weight=1f })
+            view.start()
+            nav.forEach { it.nextFocusDownId=view.entryId }
+            return
+        }
         if(tab==5) {
             val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
@@ -659,15 +678,6 @@ class MainActivity: Activity() {
             nav.forEach { it.nextFocusDownId=input.id }
             input.setOnEditorActionListener { _,_,_-> search(); true }; container.addView(searchRow)
             com.hongguotv.nativeapp.rayneo.SearchKeyboard.bind(input)
-        } else if(tab==2) {
-            val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
-            heading.addView(text("漫剧热播榜",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-            rankRefresh=addButton(heading,"刷新榜单") { page=1; catalogFocus=""; showCatalog(true) }.apply { nextFocusUpId=nav[tab].id }
-            container.addView(heading)
-            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜",13f,muted)
-                .apply { setPadding(0,0,0,dp(8)) }
-            container.addView(rankSubtitle)
-            nav.forEach { it.nextFocusDownId=rankRefresh!!.id }
         } else if(tab>2) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
             heading.addView(text(if(tab==3) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
@@ -696,7 +706,7 @@ class MainActivity: Activity() {
             else { message(body,"正在加载…"); if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
             work({
-                val result=when(requestTab) { 0 -> repository.home(requestPage,requestType); 2 -> repository.comicRanking(requestPage); else -> repository.search(requestQuery,requestPage) }
+                val result=when(requestTab) { 0 -> repository.home(requestPage,requestType); else -> repository.search(requestQuery,requestPage) }
                 result
             }, { result ->
                 if(requestTab==0 && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
@@ -706,7 +716,6 @@ class MainActivity: Activity() {
                 } else {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
-                    rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
                 }
             }, { problem ->
@@ -715,7 +724,7 @@ class MainActivity: Activity() {
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
-                catalog=emptyList(); hasMore=false; ranking=null; rankSubtitle?.text="榜单加载失败"
+                catalog=emptyList(); hasMore=false; ranking=null
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     notices.show("搜索结果已过期，已回到第 1 页刷新",1)
@@ -727,6 +736,61 @@ class MainActivity: Activity() {
                 }
             })
         } else catalogGrid(body,focusNav,focusType)
+    }
+    /** 多条件找剧：条件与已显示的结果由 [DiscoveryController] 保留，返回时按记录还原。 */
+    private fun showDiscovery() {
+        screen="discover"; invalidatePage(); releaseCatalogViews()
+        val container=base()
+        val header=row().apply { setPadding(0,0,0,dp(8)) }
+        val back=addButton(header,"‹ 返回") { goBack() }
+        header.addView(text("多条件找剧",24f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f; leftMargin=dp(8) })
+        container.addView(header)
+        container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
+        val view=DiscoveryView(this,discovery,::loadCover,{ item,_ -> openDetail(item) },::fetchDiscovery,back.id)
+        discoveryView=view
+        container.addView(view,lp(-1,0).apply { weight=1f })
+        view.start()
+        back.nextFocusDownId=view.entryId
+        view.post { view.requestEntry() }
+    }
+    private fun fetchDiscovery(selection: DiscoverySelection,cursor: DiscoveryCursor?,done: (Result<FilteredDiscoveryPage>)->Unit) {
+        work({ repository.filteredDiscovery(selection,cursor) },{ page -> if(screen=="discover") done(Result.success(page)) },{ problem ->
+            if(screen=="discover") done(Result.failure(problem))
+        })
+    }
+    /**
+     * 每个榜单独立发起请求，互不取消；结果到达时先向 [RankRequests] 确认归属。
+     * 进详情这类只是离开榜单的情况仍然落缓存、不重画；被 onStop 取消的请求连缓存都不写。
+     */
+    private fun fetchRank(board: RankBoard,immediate: Boolean) {
+        val ticket=rankRequests.begin(board) ?: return
+        val epoch=rankEpoch
+        val scope=RequestScope()
+        rankScopes[board]=scope
+        // 用户按刷新时立刻把按钮换成进行中；自动续期不打断当前焦点。
+        if(immediate && screen=="catalog" && tab==2 && rank.board==board) rankView?.render()
+        io.submit {
+            val result=runCatching { scope.run { repository.rankSnapshot(board) } }
+            main.post {
+                // 已被取消或被新请求取代：不写缓存、不清在途标记，也不碰界面。
+                if(isDestroyed || !rankRequests.finish(board,ticket,result.getOrNull())) return@post
+                // 请求归属已确认，释放该榜的取消句柄；旧请求的句柄不能误删新请求的。
+                if(rankScopes[board]===scope) rankScopes.remove(board)
+                if(!foreground || epoch!=rankEpoch || screen!="catalog" || tab!=2 || rank.board!=board) return@post
+                result.onSuccess { rankView?.render() }.onFailure { rankView?.renderFailure(rankProblem(it)) }
+            }
+        }
+    }
+    /** 离开页面时取消在途请求：先取消同步 I/O，再作废票据，避免晚到结果写缓存或清标记。 */
+    private fun cancelRankRequests() {
+        rankScopes.values.toList().forEach { it.cancel() }
+        rankScopes.clear()
+        rankRequests.cancelAll()
+    }
+    private fun rankProblem(problem: Throwable)=when(problem) {
+        is java.net.UnknownHostException -> "无法连接内容网站，请检查网络后重试。"
+        is java.net.SocketTimeoutException -> "连接超时，请按刷新重试。"
+        else -> problem.message.orEmpty().replace(Regex("https?://\\S+"),"[地址]").take(90).ifBlank { "榜单暂时无法加载，请刷新重试。" }
     }
     private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false) {
         if(tab==0 && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
@@ -798,11 +862,10 @@ class MainActivity: Activity() {
         cards.forEachIndexed { index,card ->
             card.nextFocusLeftId=if(index%count==0) card.id else cards[index-1].id
             card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
-            card.nextFocusUpId=if(index<count) (searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(index,2))?.id ?: nav[tab].id) else cards[index-count].id
+            card.nextFocusUpId=if(index<count) (searchInput?.id ?: collectionBack?.id ?: typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(index,2))?.id ?: nav[tab].id) else cards[index-count].id
             card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else if(index/count<cards.lastIndex/count) cards.last().id else next?.takeIf { it.isFocusable }?.id ?: prev?.takeIf { it.isFocusable }?.id ?: card.id
         }
-        nav.forEach { it.nextFocusDownId=searchInput?.id ?: typeButtons[library.contentType]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
-        rankRefresh?.nextFocusDownId=cards.first().id
+        nav.forEach { it.nextFocusDownId=searchInput?.id ?: typeButtons[library.contentType]?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
         historyManage?.nextFocusDownId=cards.first().id
         favoriteCheck?.nextFocusDownId=cards.first().id
         collectionBack?.nextFocusDownId=cards.first().id
@@ -851,7 +914,7 @@ class MainActivity: Activity() {
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
         val top=if(inlineHomeFilters()) nav[0] else typeButtons.getValue(library.contentType)
         val home=HomeScreen(this,top,::loadCover,{ item,label -> preview.show(item,if(label.startsWith("第 ")) selectionStatus(item) else listOf(label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · ")) },
-            { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it })
+            { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it },{ showDiscovery() })
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         val hot=catalog.filterNot { it.id in library.hidden() }
         home.render(homeShelves(),catalogFocus,!focusNav && !focusType,
@@ -1110,6 +1173,8 @@ class MainActivity: Activity() {
         })
     }
     private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true,capturedSelection: AccountContext?=accountRepository.captureAccount()) {
+        // 只有从片库直开详情时重记来源；从播放器返回详情、账号返回都沿用原来源。
+        if(screen=="discover") detailOrigin="discover" else if(screen=="catalog") detailOrigin=""
         pendingDetail=series; detailAutoplay=autoplay
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
         val body=base(series.title); message(body,"正在加载剧集…")
@@ -2055,7 +2120,12 @@ class MainActivity: Activity() {
         when(screen) {
             "player" -> if(hud.visibility==View.VISIBLE && !playError) { suppressSeasonContinuation(); hidePlaybackOverlay() } else returnToDetail()
             "account" -> accountScreen?.goBack() ?: run { tab=5; showCatalog() }
-            "detail" -> if(accountReturn) showAccount(accountReturnSection,pendingDetail?.id) else showCatalog()
+            "detail" -> when {
+                accountReturn -> showAccount(accountReturnSection,pendingDetail?.id)
+                detailOrigin=="discover" -> { detailOrigin=""; showDiscovery() }
+                else -> showCatalog()
+            }
+            "discover" -> showCatalog()
             else -> if(collection!=null) { leaveCollection(); showCatalog() } else if(nav.any { it.hasFocus() }) { if(tab!=0) { switchTab(0); nav[0].requestFocus() } else finish() } else nav.getOrNull(tab)?.requestFocus()
         }
     }
@@ -2106,6 +2176,7 @@ class MainActivity: Activity() {
             "player" -> { val position=currentPosition(); val autoplay=player?.playWhenReady==true && !pausedForLifecycle; playEpisode(episodeIndex,position,autoplay) }
             "detail" -> if(detail!=null) showDetail(false)
             "account" -> showAccount()
+            "discover" -> showDiscovery()
             else -> showCatalog()
         }
     }
@@ -2121,7 +2192,8 @@ class MainActivity: Activity() {
                     "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
                     "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false,capturedSelection=playbackAccount) } ?: showCatalog()
                     "account" -> showAccount()
-                    else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab==0 || tab==2 || (tab==1 && query.isNotBlank())))
+                    "discover" -> showDiscovery()
+                    else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab==0 || (tab==1 && query.isNotBlank())))
                 }
             } else {
                 val waiting=deferredWork; deferredWork=null; waiting?.apply?.invoke()
@@ -2146,7 +2218,8 @@ class MainActivity: Activity() {
     }
     override fun onStop() {
         com.hongguotv.nativeapp.rayneo.SearchKeyboard.close(searchInput)
-        restoreStoppedPage=true; generation++; cancelWork(); tvTools.close()
+        restoreStoppedPage=true; generation++; cancelWork(); tvTools.close(); rankEpoch++; cancelRankRequests()
+        discoveryView?.cancel()
         if(screen=="player") { startPosition=currentPosition(); saveProgress(); releasePlayer() }
         artwork.cancelPage(clearMemory=true); library.flush(); super.onStop()
     }
@@ -2162,7 +2235,7 @@ class MainActivity: Activity() {
         if(autoProgressSyncDelegate.isInitialized()) autoProgressSyncDelegate.value.close()
         if(progressMergeDelegate.isInitialized()) progressMergeDelegate.value.close()
         accountScreen?.destroy(); accountScreen=null; accountHistorySync.close(); accountIntents.close()
-        generation++; cancelWork()
+        generation++; cancelWork(); cancelRankRequests()
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()
         artwork.close(); releaseCatalogViews(); mediaSession.release(); main.removeCallbacksAndMessages(null)

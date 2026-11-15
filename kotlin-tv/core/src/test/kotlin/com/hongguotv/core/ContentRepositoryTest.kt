@@ -337,4 +337,23 @@ class ContentRepositoryTest {
         assertEquals("7702023183850818585",next?.series?.id)
         assertEquals(116,next?.episodes?.size)
     }
+
+    @Test fun seriesJsonRoundTripsSeasonIndexAndReadsOldData() {
+        val fresh=Series("1","长剧第三季",seasonIndex=3)
+        assertEquals(fresh,Series.fromJson(fresh.toJson()))
+        assertEquals(3,Series.fromJson(fresh.toJson()).seasonIndex)
+        val legacy=JSONObject().put("id","1").put("title","长剧").put("bookType",2)
+        val old=Series.fromJson(legacy)
+        assertEquals(0,old.seasonIndex)
+        assertEquals(2,old.bookType)
+    }
+
+    @Test fun detailCardPropagatesSeasonIndex() {
+        val repo=repository {
+            """<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{"series_id":"123","series_name":"长剧第三季","season_index":3,"vid_list":["123456"]}}}};</script>"""
+        }
+        val detail=repo.detail("123")
+        assertEquals("长剧第三季",detail.series.title)
+        assertEquals(3,detail.series.seasonIndex)
+    }
 }

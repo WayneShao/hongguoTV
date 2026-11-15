@@ -14,9 +14,9 @@ import java.util.concurrent.TimeUnit
 internal fun JSONArray.objects() = (0 until length()).mapNotNull { optJSONObject(it) }
 internal fun JSONObject.str(key: String) = if (isNull(key)) "" else optString(key, "").trim()
 internal fun cleanUrl(s: String) = s.replace("\\/","/").replace("\\u002F","/",ignoreCase=true).replace("\\u0026","&").replace("&amp;","&")
-data class Series(val id: String, val title: String, val cover: String = "", val description: String = "", val badge: String = "", val tags: String = "", val preview: Boolean = false, val bookType: Int = 0) {
-    fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags).put("preview",preview).put("bookType",bookType)
-    companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags"),o.optBoolean("preview",false),o.optInt("bookType",0)) }
+data class Series(val id: String, val title: String, val cover: String = "", val description: String = "", val badge: String = "", val tags: String = "", val preview: Boolean = false, val bookType: Int = 0, val seasonIndex: Int = 0) {
+    fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags).put("preview",preview).put("bookType",bookType).put("seasonIndex",seasonIndex)
+    companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags"),o.optBoolean("preview",false),o.optInt("bookType",0),o.optInt("seasonIndex",0)) }
 }
 data class Detail(val series: Series, val episodes: List<String>)
 data class RankPosition(val rank: Int?, val heat: String)
@@ -68,7 +68,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         val o=item.optJSONObject("video_data") ?: item
         val count=o.optInt("episode_cnt",o.optJSONObject("series_episode_info")?.optInt("episode_cnt",0) ?: 0)
         val tags=o.optJSONArray("tags") ?: o.optJSONArray("category_list") ?: JSONArray()
-        return Series(o.str("series_id"),o.str("series_name").ifEmpty { o.str("series_title").ifEmpty { item.str("name") } },CoverArt.forDisplay(o.str("series_cover")),o.str("series_intro"),o.str("episode_right_text").ifEmpty { if(count>0) "全 ${count} 集" else "" },(0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
+        return Series(o.str("series_id"),o.str("series_name").ifEmpty { o.str("series_title").ifEmpty { item.str("name") } },CoverArt.forDisplay(o.str("series_cover")),o.str("series_intro"),o.str("episode_right_text").ifEmpty { if(count>0) "全 ${count} 集" else "" },(0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) },seasonIndex=o.optInt("season_index",0).coerceAtLeast(0))
     }
     private fun valid(rows: List<Series>) = rows.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
     private fun isIdentityRisk(httpCode: Int, body: String): Boolean {
@@ -77,15 +77,53 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     private val warmHomes=WarmPageCache<CatalogPage>(20)
     private val warmRanks=WarmPageCache<CatalogPage>(20)
+    private val warmDiscovery=WarmPageCache<FilteredDiscoveryPage>(4)
     private val warmDetails=WarmPageCache<Detail>(12)
 
     fun warmHome(page: Int): CatalogPage=fetchHome(page).also { warmHomes.put("home:$page",it) }
-    fun warmComicRanking(page: Int): CatalogPage=ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page).also { warmRanks.put("comic:$page",it) }
+    fun warmComicRanking(page: Int): CatalogPage=warmRankPage(RankBoard.COMIC,page)
+    fun warmRankPage(board: RankBoard, page: Int): CatalogPage=fetchRankPage(board,page).also { warmRanks.put("${board.name}:$page",it) }
+    fun warmDiscovery(): FilteredDiscoveryPage=fetchFilteredDiscovery(DiscoverySelection(),null).also { warmDiscovery.put("default",it) }
     fun warmDetail(id: String) { warmDetails.put(id,fetchDetail(id)) }
 
-    fun comicRanking(page: Int = 1): CatalogPage {
+    fun comicRanking(page: Int = 1): CatalogPage = rankPage(RankBoard.COMIC,page)
+    fun rankPage(board: RankBoard, page: Int = 1): CatalogPage {
         require(page in 1..100)
-        return warmRanks.take("comic:$page") ?: ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
+        return warmRanks.take("${board.name}:$page") ?: fetchRankPage(board,page)
+    }
+    private fun fetchRankPage(board: RankBoard, page: Int): CatalogPage {
+        require(page in 1..100)
+        return ComicRank.parse(text("$site/rank/${board.route}?page=$page"),page,board)
+    }
+    fun rankSnapshot(board: RankBoard): RankSnapshot {
+        val first=rankPage(board)
+        val meta=first.ranking ?: throw IOException("榜单信息缺失")
+        // Public boards currently expose 100 entries across five pages. Never claim
+        // a complete board if the upstream size changes beyond this bounded request.
+        if(meta.totalPages>5) throw IOException("榜单页数已变化，请稍后重试")
+        val rows=first.items.toMutableList()
+        val positions=meta.positions.toMutableMap()
+        for(page in 2..meta.totalPages) {
+            val next=rankPage(board,page)
+            if(next.ranking?.totalPages!=meta.totalPages) throw IOException("榜单正在更新，请刷新重试")
+            rows+=next.items
+            positions.putAll(next.ranking.positions)
+        }
+        return RankSnapshot(board,rows.distinctBy { it.id },meta.copy(positions=positions))
+    }
+    fun filteredDiscovery(selection: DiscoverySelection, cursor: DiscoveryCursor? = null): FilteredDiscoveryPage =
+        (if(cursor==null && selection.values.isEmpty()) warmDiscovery.take("default") else null)
+            ?: fetchFilteredDiscovery(selection,cursor)
+    private fun fetchFilteredDiscovery(selection: DiscoverySelection, cursor: DiscoveryCursor?): FilteredDiscoveryPage {
+        val values=VendorConstants.device.toMutableMap()
+        for(key in listOf("version_code","manifest_version_code","update_version_code","pv_player")) values[key]="73532"
+        values["version_name"]="7.3.5.32"
+        val signed=signer.sign(
+            "https://api5-normal-sinfonlineb.fqnovel.com/reading/distribution/category/landpage/v/",
+            values,
+            selection.request(cursor).toString().toByteArray(Charsets.UTF_8),
+        )
+        return FilteredDiscoveryParser.parse(text(signed.url,signed),cursor)
     }
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         if(type==ContentType.COMIC) return comicRanking(page)
@@ -189,7 +227,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 val id=video.str("series_id").ifEmpty { row.str("book_id").ifEmpty { row.str("search_result_id") } }
                 val title=row.optJSONObject("search_high_light")?.optJSONObject("title")?.str("text").orEmpty().ifEmpty { video.str("title").ifEmpty { row.str("cell_name") } }
                 val count=video.optInt("episode_cnt")
-                list+=Series(id,title,CoverArt.forDisplay(video.str("cover").ifEmpty { video.str("cover_url") }),video.str("video_desc"),if(count>0) "全 $count 集" else video.str("rec_text"),video.str("sub_title"),bookType=video.optInt("book_type",row.optInt("book_type",2)))
+                list+=Series(id,title,CoverArt.forDisplay(video.str("cover").ifEmpty { video.str("cover_url") }),video.str("video_desc"),if(count>0) "全 $count 集" else video.str("rec_text"),video.str("sub_title"),bookType=video.optInt("book_type",row.optInt("book_type",2)),seasonIndex=video.optInt("season_index",0).coerceAtLeast(0))
             }
         }
         synchronized(searchCursors) {

@@ -41,7 +41,7 @@ class RelatedWorksTest {
         type: Int = 1004,
         upcoming: Boolean = false,
         preview: Boolean = false,
-    ) = RelatedWork(Series(id, title, preview = preview), if (index > 0) "第${index}季" else "", upcoming, index, type)
+    ) = RelatedWork(Series(id, title, preview = preview, seasonIndex = index), if (index > 0) "第${index}季" else "", upcoming, index, type)
 
     @Test fun parseKeepsOnlyActionableShortDramasFromTheRelatedCell() {
         val rows = RelatedWorks.parse(
@@ -155,7 +155,8 @@ class RelatedWorksTest {
         assertEquals("3", next(work("3", "长剧第三季", 3))?.series?.id)
         assertEquals("3", next(work("3", "长剧第三季", 0))?.series?.id)
         assertNull(next(work("3", "长剧第三季", 2)))
-        assertNull(next(work("3", "长剧", 3)))
+        // A bare title with explicit season_index is authoritative after the metadata feature.
+        assertEquals("3", next(work("3", "长剧", 3))?.series?.id)
         assertNull(next(work("3", "长剧第三季番外", 3)))
         assertNull(next(work("3", "长剧第三季", 4)))
     }
