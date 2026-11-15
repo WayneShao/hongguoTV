@@ -39,7 +39,8 @@ class HomeScreen(
     private val selected: (Series,String)->Unit,
     private val open: (Series,Boolean)->Unit,
     private val actions: (Series,View)->Unit,
-    private val remember: (String)->Unit
+    private val remember: (String)->Unit,
+    private val discover: (()->Unit)?=null
 ): LinearLayout(context) {
     data class Entry(val series: Series,val label: String,val resume: Boolean=false,val progress: Int?=null)
     data class Shelf(val key: String,val title: String,val entries: List<Entry>,val more: (() -> Unit)?=null)
@@ -57,6 +58,7 @@ class HomeScreen(
     private var shelves=emptyList<Shelf>()
     private var footerMore: (() -> Unit)?=null
     private var moreButton: View?=null
+    private var discoverView: View?=null
     private var lastFocus=""
     private var lastRow: String?=null
     private var restoring=false
@@ -65,7 +67,7 @@ class HomeScreen(
     init { orientation=VERTICAL; scroll.addView(contents); addView(scroll,LayoutParams(-1,0,1f)) }
 
     fun capturePosition(): Position {
-        val key=findFocus()?.tag?.toString()?.takeIf { it in cards || it=="home:refresh" || it=="home:more" } ?: lastFocus
+        val key=findFocus()?.tag?.toString()?.takeIf { it in cards || it=="home:refresh" || it=="home:more" || it=="home:discover" } ?: lastFocus
         val row=rows.indexOfFirst { item -> item.cards.any { it.key==key } }
         val column=rows.getOrNull(row)?.cards?.indexOfFirst { it.key==key } ?: 0
         return Position(key,rows.getOrNull(row)?.key,column.coerceAtLeast(0),row.coerceAtLeast(0),scroll.scrollY,rows.associate { it.key to it.horizontal.scrollX })
@@ -100,7 +102,26 @@ class HomeScreen(
     fun render(shelves: List<Shelf>,focus: String,requestFocus: Boolean,more: (() -> Unit)?,position: Position?=null) {
         val previous=position ?: if(rows.isNotEmpty()) capturePosition() else null
         this.shelves=shelves; footerMore=more; revision++; val ticket=revision; restoring=true
-        contents.removeAllViews(); rows.clear(); cards.clear(); moreButton=null; lastRow=null
+        contents.removeAllViews(); rows.clear(); cards.clear(); moreButton=null; lastRow=null; discoverView=null
+        discover?.let { action ->
+            val banner=LinearLayout(context).apply {
+                orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL
+                id=View.generateViewId(); tag="home:discover"
+                isFocusable=true; isFocusableInTouchMode=true
+                setPadding(dp(14),dp(10),dp(14),dp(10)); background=shape(false)
+                contentDescription="多条件找剧，按类型、题材、背景等条件一起筛选"
+                setOnClickListener { lastFocus=tag.toString(); remember(tag.toString()); action() }
+                setOnFocusChangeListener { view,focused -> view.background=shape(focused); if(focused) { lastFocus=tag.toString(); remember(tag.toString()) } }
+            }
+            banner.addView(View(context).apply { background=TvStyle.shape(context,accent,radius=2) },LayoutParams(dp(3),dp(28)).apply { rightMargin=dp(10) })
+            val words=LinearLayout(context).apply { orientation=VERTICAL }
+            words.addView(label("多条件找剧",16f).apply { setTypeface(null,Typeface.BOLD) })
+            words.addView(label("类型、题材、背景、时间等条件可以一起选",11f,TvStyle.muted).apply { setPadding(0,dp(2),0,0) })
+            banner.addView(words,LayoutParams(0,-2,1f))
+            banner.addView(label("进入  ›",12f,accent).apply { setPadding(dp(10),0,0,0) })
+            contents.addView(banner,LayoutParams(-1,-2).apply { bottomMargin=dp(14) })
+            discoverView=banner
+        }
         shelves.filter { it.entries.isNotEmpty() || it.more!=null }.forEach { shelf ->
             val block=LinearLayout(context).apply { orientation=VERTICAL }
             val heading=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(2),dp(4),dp(2),dp(9)) }
@@ -153,12 +174,17 @@ class HomeScreen(
             val next=label("更多热门  ›",15f).apply { id=View.generateViewId(); tag="home:more"; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(12),dp(12),dp(12),dp(12)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() }; setOnClickListener { more() } }
             contents.addView(next,LayoutParams(-1,-2).apply { topMargin=dp(8) }); footer+=next; moreButton=next
         }
+        val above=discoverView ?: top
         rows.forEachIndexed { i,row -> row.cards.forEachIndexed { j,card ->
             card.view.nextFocusLeftId=row.cards[(j-1).coerceAtLeast(0)].view.id; card.view.nextFocusRightId=row.cards[(j+1).coerceAtMost(row.cards.lastIndex)].view.id
-            card.view.nextFocusUpId=if(i==0) top.id else rows[i-1].cards[j.coerceAtMost(rows[i-1].cards.lastIndex)].view.id
+            card.view.nextFocusUpId=if(i==0) above.id else rows[i-1].cards[j.coerceAtMost(rows[i-1].cards.lastIndex)].view.id
             card.view.nextFocusDownId=if(i==rows.lastIndex) refresh.id else rows[i+1].cards[j.coerceAtMost(rows[i+1].cards.lastIndex)].view.id
         } }
         footer.forEachIndexed { i,v -> v.nextFocusUpId=if(i==0) rows.lastOrNull()?.cards?.firstOrNull()?.view?.id ?: top.id else footer[i-1].id; v.nextFocusDownId=footer.getOrNull(i+1)?.id ?: v.id }
+        discoverView?.let { banner ->
+            banner.nextFocusUpId=top.id
+            banner.nextFocusDownId=rows.firstOrNull()?.cards?.firstOrNull()?.view?.id ?: refresh.id
+        }
         top.nextFocusDownId=firstId()
         val preferred=focus.ifBlank { previous?.focus.orEmpty() }
         val target=target(preferred,previous)
@@ -183,6 +209,7 @@ class HomeScreen(
     }
 
     private fun target(key: String,position: Position?): View {
+        if(key=="home:discover") discoverView?.let { return it }
         if(key=="home:refresh") return refresh
         if(key=="home:more") moreButton?.let { return it }
         cards[key]?.let { return it.view }
@@ -252,5 +279,5 @@ class HomeScreen(
             row.cards.forEach { card -> card.view.getChildAt(0).let { artwork -> if(artwork.layoutParams.height!=imageHeight) artwork.layoutParams=artwork.layoutParams.apply { height=imageHeight } } }
         }
     }
-    fun firstId()=rows.firstOrNull()?.cards?.firstOrNull()?.view?.id ?: refresh.id
+    fun firstId()=discoverView?.id ?: rows.firstOrNull()?.cards?.firstOrNull()?.view?.id ?: refresh.id
 }

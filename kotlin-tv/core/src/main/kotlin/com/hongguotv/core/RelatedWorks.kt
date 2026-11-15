@@ -50,19 +50,21 @@ object RelatedWorks {
         compareBy<RelatedWork> { if (stem(it.series.title) == stem(current.title)) 0 else 1 }
             .thenBy { stem(it.series.title) }
             .thenBy { it.seasonIndex.takeIf { n -> n > 0 }
+                ?: it.series.seasonIndex.takeIf { n -> n > 0 }
                 ?: seasonSuffix.find(it.series.title.trim())?.groupValues?.get(1)?.let(::seasonNumber)
                 ?: 1 }
     )
 
     /**
-     * Conservative: both titles must carry explicit adjacent season numbers, the title stems must
-     * match, optional season metadata must agree, and exactly one playable candidate may remain.
-     * Browsing may infer an unnumbered season; autoplay never does.
+     * Conservative: both titles must carry explicit adjacent season numbers (or trusted
+     * `season_index` metadata when a title is bare), the title stems must match, optional season
+     * metadata must agree, and exactly one playable candidate may remain. Browsing may infer an
+     * unnumbered season from metadata; autoplay never assumes a missing season.
      */
     fun nextSeason(current: Series, rows: List<RelatedWork>): RelatedWork? {
-        val source = SeasonContinuation.name(current.title) ?: return null
+        val source = SeasonContinuation.identity(current) ?: return null
         return rows.filter { row ->
-            val candidate = SeasonContinuation.name(row.series.title) ?: return@filter false
+            val candidate = SeasonContinuation.identity(row.series) ?: return@filter false
             !row.upcoming && row.series.id != current.id && candidate.season == source.season + 1 &&
                 (row.seasonIndex <= 0 || row.seasonIndex == candidate.season) &&
                 candidate.base == source.base
@@ -73,8 +75,9 @@ object RelatedWorks {
      * Related rows carry a verified playable content type even when the website detail/search
      * response omits book_type. Only `content_type=1004` is authoritative provenance: unknowns
      * (`bookType=0`) may continue solely on that proof plus detail re-verification, known
-     * incompatible types are rejected, and previews never autoplay. Ambiguous same-name seasons
-     * are still rejected upstream.
+     * incompatible types are rejected, and previews never autoplay. A detail page that omits
+     * `season_index` adopts the candidate's value only for the same id and title, then rechecks.
+     * Ambiguous same-name seasons are still rejected upstream.
      */
     fun verifiedNextSeason(
         current: Series,
@@ -87,7 +90,9 @@ object RelatedWorks {
             !playableBookType(candidate.series.bookType)) return null
         RequestScope.ensureActive()
         val verified = detail(candidate.series.id)
-        return verified.takeIf {
+        val series = SeasonContinuation.merged(candidate.series, verified.series) ?: return null
+        if (nextSeason(current, listOf(candidate.copy(series = series))) == null) return null
+        return verified.copy(series = series).takeIf {
             it.series.id == candidate.series.id &&
                 !it.series.preview &&
                 playableBookType(it.series.bookType) &&
@@ -128,6 +133,7 @@ object RelatedWorks {
                     row.optJSONObject("tag_info")?.str("text").orEmpty().ifBlank {
                         row.optInt("season_index").takeIf { it > 0 }?.let { "第${it}季" }.orEmpty()
                     }
+                val seasonIndex = row.optInt("season_index").coerceAtLeast(0)
                 RelatedWork(
                     Series(
                         id,
@@ -135,10 +141,11 @@ object RelatedWorks {
                         CoverArt.forDisplay(row.str("cover")),
                         row.str("video_desc"),
                         if (upcoming) "待上线" else "全 ${row.optInt("episode_cnt")} 集",
+                        seasonIndex = seasonIndex,
                     ),
                     season,
                     upcoming,
-                    row.optInt("season_index").coerceAtLeast(0),
+                    seasonIndex,
                     type,
                 )
             }

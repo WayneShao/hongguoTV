@@ -1,0 +1,136 @@
+package com.hongguotv.core
+
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.*
+import org.junit.Test
+import java.io.IOException
+
+class RankBrowserTest {
+    private fun page(board: RankBoard, p: Int, total: Int = 2, season: Int = 0): String {
+        val row = JSONObject()
+            .put("seriesId", (100 + p).toString())
+            .put("title", "剧$p")
+            .put("rank", 20 + p)
+            .put("heatText", "100万热度")
+            .put("tags", JSONArray().put(if (p == 1) "穿越" else "重生"))
+            .put("episodeCount", 12)
+        if (season > 0) row.put("season_index", season)
+        val payload = JSONObject()
+            .put("isSuccess", true)
+            .put("rankList", JSONArray().put(row))
+            .put("pagination", JSONObject().put("pageNum", p).put("totalPages", total))
+        val args = JSONArray().put(board.loader).put("content").put(payload)
+        return "<script data-fn-name=\"r\" data-fn-args=\"${args.toString().replace("\"", "&quot;")}\"></script>"
+    }
+
+    @Test fun allVerifiedBoardsUseTheirOwnRoutesAndIncludeLaterPageTopics() {
+        for (board in RankBoard.entries) {
+            var requests = 0
+            val http = OkHttpClient.Builder()
+                .addInterceptor { chain ->
+                    val request = chain.request()
+                    requests++
+                    assertEquals("/rank/${board.route}", request.url.encodedPath)
+                    val p = request.url.queryParameter("page")!!.toInt()
+                    Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                        .code(200).message("OK").body(page(board, p).toResponseBody()).build()
+                }
+                .build()
+            val snapshot = ContentRepository(http).rankSnapshot(board)
+            assertEquals(2, requests)
+            assertEquals(listOf("穿越", "重生"), snapshot.topics)
+            assertEquals("102", snapshot.filtered("重生").single().id)
+            assertEquals(22, snapshot.ranking.positions["102"]?.rank)
+            assertTrue(snapshot.filtered("穿").isEmpty())
+            assertEquals(2, snapshot.filtered("").size)
+        }
+    }
+
+    @Test fun wrongBoardNeverFallsBackToAnotherRanking() {
+        assertThrows(IOException::class.java) {
+            ComicRank.parse(page(RankBoard.REAL, 1), 1, RankBoard.AI)
+        }
+    }
+
+    @Test fun incompleteSnapshotFailsInsteadOfSilentlyFilteringOnlyFirstPage() {
+        val http = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                if (request.url.queryParameter("page") == "2") throw IOException("offline")
+                Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                    .code(200).message("OK").body(page(RankBoard.ALL, 1).toResponseBody()).build()
+            }
+            .build()
+        assertThrows(IOException::class.java) { ContentRepository(http).rankSnapshot(RankBoard.ALL) }
+        val tooLarge = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                    .code(200).message("OK").body(page(RankBoard.ALL, 1, 6).toResponseBody()).build()
+            }
+            .build()
+        assertThrows(IOException::class.java) { ContentRepository(tooLarge).rankSnapshot(RankBoard.ALL) }
+    }
+
+    @Test fun numericMetadataIsNotExposedAsATopic() {
+        val snapshot = RankSnapshot(
+            RankBoard.COMIC,
+            listOf(Series("1", "剧", tags = "205 · 系统 · 穿越")),
+            ComicRanking(emptyMap(), 1, ""),
+        )
+        assertFalse(snapshot.topics.contains("205"))
+        assertTrue(snapshot.filtered("205").isEmpty())
+        assertEquals("1", snapshot.filtered("系统").single().id)
+    }
+
+    @Test fun websiteCastAndContentTypesDoNotBecomeGenreFilters() {
+        val snapshot = RankSnapshot(
+            RankBoard.ALL,
+            listOf(
+                Series("1", "剧一", tags = "漫剧 · 玄幻 · 姜月初 · 百花宗主"),
+                Series("2", "剧二", tags = "真人剧 · 家庭 · 张艳 · 杨凯文"),
+                Series("3", "剧三", tags = "AI剧 · 剧情 · 沈栀 · 林瑶"),
+                Series("4", "剧四", tags = "205 · 未知标签 · 99号 · 9.5分"),
+                Series("5", "剧五", tags = "玄幻 · 玄幻 · 玄幻"),
+            ),
+            ComicRanking(mapOf("1" to RankPosition(7, "100万热度")), 1, ""),
+        )
+        assertEquals(listOf("玄幻", "剧情", "家庭"), snapshot.topics)
+        for (metadata in listOf("漫剧", "真人剧", "AI剧", "姜月初", "百花宗主", "未知标签", "99号")) {
+            assertTrue(snapshot.filtered(metadata).isEmpty())
+        }
+        assertEquals(listOf("1", "5"), snapshot.filtered("玄幻").map { it.id })
+        assertEquals(7, snapshot.ranking.positions["1"]?.rank)
+        assertEquals(snapshot.items, snapshot.filtered(""))
+        assertEquals("漫剧 · 玄幻 · 姜月初 · 百花宗主", snapshot.items.first().tags)
+    }
+
+    @Test fun rankRowsPropagateSeasonIndex() {
+        val http = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                    .code(200).message("OK")
+                    .body(page(RankBoard.REAL, 1, 1, season = 3).toResponseBody()).build()
+            }
+            .build()
+        assertEquals(3, ContentRepository(http).rankSnapshot(RankBoard.REAL).items.single().seasonIndex)
+    }
+
+    @Test fun changingBoardResetsTopicPageAndFocusWithoutDiscardingOtherSnapshots() {
+        val state = RankBrowserState()
+        state.topic = "穿越"
+        state.page = 3
+        state.selectedId = "123"
+        state.select(RankBoard.AI)
+        assertEquals("", state.topic)
+        assertEquals(1, state.page)
+        assertEquals("", state.selectedId)
+        state.page = 2
+        state.filter("系统")
+        assertEquals(1, state.page)
+    }
+}

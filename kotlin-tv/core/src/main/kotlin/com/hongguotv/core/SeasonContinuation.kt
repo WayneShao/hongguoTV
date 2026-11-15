@@ -6,7 +6,9 @@ import java.text.Normalizer
 /** Conservative adjacent numbered seasons. Search failures propagate; callers retain ended controls. */
 object SeasonContinuation {
     internal data class Name(val base: String,val season: Int)
-    private val suffix=Regex("^(.*?)第([0-9零〇一二两三四五六七八九十百]+)季$")
+    /** The leading 第 is optional: both “第40季” and “40季” are explicit season names. */
+    private val marker=Regex("第?([0-9零〇一二两三四五六七八九十百]+)季")
+    private fun normalize(title: String)=Normalizer.normalize(title,Normalizer.Form.NFKC).replace(Regex("[\\p{P}\\p{Z}\\s]"),"")
     private fun number(value: String): Int? {
         value.toIntOrNull()?.let { return it.takeIf { n -> n in 1..999 } }
         val normalized=value.replace('两','二').replace('〇','零')
@@ -23,17 +25,51 @@ object SeasonContinuation {
         }
         return (sum+digit).takeIf { it in 1..999 }
     }
+    /** Exactly one marker, and it must terminate the title; embedded numbers are never a season. */
     internal fun name(title: String): Name? {
-        val normalized=Normalizer.normalize(title,Normalizer.Form.NFKC).replace(Regex("[\\p{P}\\p{Z}\\s]"),"")
-        val match=suffix.matchEntire(normalized) ?: return null
-        val base=match.groupValues[1].takeIf { it.isNotBlank() } ?: return null
-        return Name(base,number(match.groupValues[2]) ?: return null)
+        val normalized=normalize(title)
+        if(normalized.isEmpty()) return null
+        val matches=marker.findAll(normalized).toList()
+        if(matches.size!=1) return null
+        val match=matches.single()
+        if(match.range.last!=normalized.lastIndex) return null
+        val base=normalized.substring(0,match.range.first).takeIf { it.isNotBlank() } ?: return null
+        return Name(base,number(match.groupValues[1]) ?: return null)
+    }
+    /**
+     * Title first. A positive `seasonIndex` within the title parser's 1..999 range is trusted only
+     * for a title without any season marker, and always conflicts with an explicit marker instead
+     * of overriding it. Silence stays unknown: a bare title and no metadata is never assumed to be
+     * season one. An index outside the parser's range is not metadata this app can verify.
+     */
+    internal fun identity(series: Series): Name? {
+        val parsed=name(series.title)
+        if(series.seasonIndex<=0) return parsed
+        if(series.seasonIndex>999) return null
+        if(parsed==null) {
+            val bare=normalize(series.title)
+            if(bare.isEmpty() || '季' in bare) return null
+            return Name(bare,series.seasonIndex)
+        }
+        return parsed.takeIf { it.season==series.seasonIndex }
+    }
+    private fun titleKey(title: String)=normalize(title)
+    /**
+     * Detail may omit season metadata. Adopt the candidate's value only when id and title both
+     * prove the same work; a detail page that already carries metadata, or a differently written
+     * title, is checked as-is and never overwritten.
+     */
+    internal fun merged(candidate: Series, detail: Series): Series? {
+        if(detail.id!=candidate.id) return null
+        if(candidate.seasonIndex>0 && detail.seasonIndex<=0 && titleKey(detail.title)==titleKey(candidate.title))
+            return detail.copy(seasonIndex=candidate.seasonIndex)
+        return detail
     }
     fun find(current: Series,search: (String,Int)->CatalogPage,detail: (String)->Detail): Detail? {
         if(current.preview || current.bookType !in 2..5) return null
-        val source=name(current.title) ?: return null
+        val source=identity(current) ?: return null
         fun eligible(row: Series): Boolean {
-            val target=name(row.title) ?: return false
+            val target=identity(row) ?: return false
             return row.id.isNotBlank() && row.id!=current.id && !row.preview && row.bookType==current.bookType &&
                 target.base==source.base && target.season==source.season+1
         }
@@ -47,7 +83,10 @@ object SeasonContinuation {
         val candidate=candidates.values.singleOrNull() ?: return null
         RequestScope.ensureActive()
         val verified=detail(candidate.id)
-        return verified.takeIf { it.series.id==candidate.id && eligible(it.series) && it.episodes.isNotEmpty() && it.episodes.all(String::isNotBlank) }
+        val series=merged(candidate,verified.series) ?: return null
+        return verified.copy(series=series).takeIf {
+            eligible(it.series) && it.episodes.isNotEmpty() && it.episodes.all(String::isNotBlank)
+        }
     }
 }
 
