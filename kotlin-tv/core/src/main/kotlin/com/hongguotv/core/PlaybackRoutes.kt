@@ -35,11 +35,13 @@ internal class PlaybackRoutes {
     }
 
     companion object {
-        /** 0 短剧 POST，1 凤凰 POST；2 标签页 GET 仅作一次性兜底，不参与排序。 */
+        /** 0 短剧 POST，1 凤凰 POST，3 预加载 POST；2 标签页 GET 仅作一次性兜底，不参与排序。 */
         const val SHORTPLAY = 0
         const val PHOENIX = 1
         const val TAB = 2
-        val POST_ROUTES = listOf(SHORTPLAY, PHOENIX)
+        /** 与凤凰同身份、同签名的批量预加载拦截线路；ID 保持稳定，新增只追加在末尾。 */
+        const val PRELOAD = 3
+        val POST_ROUTES = listOf(SHORTPLAY, PHOENIX, PRELOAD)
         const val EMPTY_COOLDOWN_MILLIS = 30_000L
         const val FAILURE_COOLDOWN_MILLIS = 5_000L
     }

@@ -93,6 +93,86 @@ class PlaybackDeadlineTest {
         assertTrue("每次等待都应裁剪到剩余截止时间，实际 $waits", waits.all { it <= 40 })
     }
 
+    @Test fun optionalLimitSkipsWhenTooLittleTimeRemains() {
+        // 已有可播结果后，剩余时间必须同时覆盖「返回预留 + 最小工作」，否则直接跳过。
+        var ran = false
+        RequestScope.withDeadline(1_000) {
+            assertThrows(PlaybackDeadlineException::class.java) {
+                RequestScope.withOptionalLimit(RequestScope.OPTIONAL_LOOKUP_TIMEOUT_MILLIS) { ran = true }
+            }
+        }
+        assertFalse("剩余不足时不得发起可选请求", ran)
+        assertNull(RequestScope.remainingMillis())
+    }
+
+    @Test fun optionalLimitIsShorterThanRemainingAndKeepsReturnReserve() {
+        val inner = RequestScope.withDeadline(2_000) {
+            RequestScope.withOptionalLimit(RequestScope.OPTIONAL_LOOKUP_TIMEOUT_MILLIS) { RequestScope.remainingMillis()!! }
+        }
+        assertTrue("可选补查必须短于剩余时间并预留返回预算，实际 ${inner}ms", inner in 1_100..1_200)
+        assertNull(RequestScope.remainingMillis())
+    }
+
+    @Test fun optionalLimitUsesItsCapWhenOuterBudgetIsLarge() {
+        val inner = RequestScope.withDeadline(6_000) {
+            RequestScope.withOptionalLimit(RequestScope.OPTIONAL_LOOKUP_TIMEOUT_MILLIS) { RequestScope.remainingMillis()!! }
+        }
+        assertTrue("上限应取可选补查自己的更短期限，实际 ${inner}ms", inner in 2_900..3_000)
+        assertNull(RequestScope.remainingMillis())
+    }
+
+    @Test fun optionalLimitRestoresOuterDeadlineAfterInnerTimeout() {
+        // 内层超时后必须已恢复外层截止点：调用方据此判断仍可安全返回已校验的行。
+        val outerRemaining = RequestScope.withDeadline(2_000) {
+            assertThrows(PlaybackDeadlineException::class.java) {
+                RequestScope.withOptionalLimit(RequestScope.OPTIONAL_LOOKUP_TIMEOUT_MILLIS) { Thread.sleep(1_400) }
+            }
+            RequestScope.remainingMillis()!!
+        }
+        assertTrue("外层截止点必须原样恢复，实际 ${outerRemaining}ms", outerRemaining in 400..700)
+        assertNull(RequestScope.remainingMillis())
+    }
+
+    @Test fun optionalLimitOutsideAnyBudgetUsesItsOwnCap() {
+        val inner = RequestScope.withOptionalLimit(1_500) { RequestScope.remainingMillis()!! }
+        assertTrue("无外层截止点时仍应有内层上限，实际 ${inner}ms", inner in 1_400..1_500)
+        assertNull(RequestScope.remainingMillis())
+    }
+
+    @Test fun nestedDeadlineNeverExtendsParentDeadline() {
+        // 子预算只能收紧：内层 5s 不得把外层 400ms 放宽。
+        val remaining = RequestScope.withDeadline(400) {
+            RequestScope.withDeadline(5_000) { RequestScope.remainingMillis()!! }
+        }
+        assertTrue("嵌套期限必须取较小值，实际 ${remaining}ms", remaining <= 400)
+        assertNull(RequestScope.remainingMillis())
+    }
+
+    @Test fun nestedDeadlineStillRejectsParsePastParentDeadline() {
+        // 子期限后动作正常返回，但父级总截止点已过：返回前的严格复查仍必须判超时。
+        assertThrows(PlaybackDeadlineException::class.java) {
+            RequestScope.withDeadline(150) {
+                RequestScope.withDeadline(5_000) { Thread.sleep(300) }
+            }
+        }
+        assertNull(RequestScope.remainingMillis())
+    }
+
+    @Test fun optionalLimitChecksCancellationBeforeStartingWork() {
+        val scope = RequestScope()
+        var ran = false
+        val failure = try {
+            scope.run {
+                scope.cancel()
+                RequestScope.withOptionalLimit(RequestScope.OPTIONAL_LOOKUP_TIMEOUT_MILLIS) { ran = true }
+            }
+            null
+        } catch (error: Throwable) { error }
+        assertFalse("取消后不得启动可选请求", ran)
+        assertTrue("取消必须先于可选补查生效，实际 $failure", PlaybackFailure.terminal(failure!!))
+        assertNull(RequestScope.remainingMillis())
+    }
+
     @Test fun canceledAuxiliaryRegistrationStopsKeyRetriesAndSleep() {
         val scope = RequestScope()
         val delays = mutableListOf<Long>()

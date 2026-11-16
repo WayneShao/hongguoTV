@@ -18,6 +18,9 @@ import java.io.IOException
 class ContentRepositoryPlayerTest {
     private companion object {
         const val deviceJson = """{"device_id":"7000000000001234567","install_id":"7000000000007654321","cdid":"c-uuid","openudid":"0123456789abcdef","secret_key":""}"""
+        const val SHORTPLAY_PATH = "/novel/player/video_model/v1/"
+        const val PHOENIX_PATH = "/novel/player/multi_video_model/v1/"
+        const val PRELOAD_PATH = "/novel/player/multi_video_model/preload/v1/"
     }
     private class FakeStore(var value: String? = deviceJson) : PlayerDeviceStore {
         val saved = mutableListOf<String?>()
@@ -44,9 +47,13 @@ class ContentRepositoryPlayerTest {
 
     @Test fun emptyEstablishedEndpointsUseExactEpisodeTabFallbackOncePerBudget() {
         var tabCalls=0
+        val postPaths=mutableListOf<String>()
         val (repo,store)=repository { request ->
             if(request.url.encodedPath.contains("video_tab")) {
-                tabCalls++;assertEquals("GET",request.method)
+                tabCalls++
+                // 标签页兜底只允许在三条已注册 POST 线路全部空之后才发起。
+                assertEquals(listOf(SHORTPLAY_PATH,PHOENIX_PATH,PRELOAD_PATH),postPaths)
+                assertEquals("GET",request.method)
                 assertNull(request.body)
                 assertFalse(request.header("x-argus").isNullOrBlank())
                 assertFalse(request.header("x-khronos").isNullOrBlank())
@@ -56,7 +63,7 @@ class ContentRepositoryPlayerTest {
                 assertEquals("7000000000001234567",request.url.queryParameter("device_id"))
                 assertEquals("1",request.url.queryParameter("device_level"))
                 """{"code":0,"data":{"video_model_data":{"123":{"video_model":{"video_list":[{"video_meta":{"vwidth":854,"vheight":480,"codec_type":"h264"},"main_url":"https://example.com/tab"}]}}}}}"""
-            } else """{"code":0,"data":{}}"""
+            } else { postPaths+=request.url.encodedPath; """{"code":0,"data":{}}""" }
         }
         val budget=PlaybackRequestBudget(8,0)
         assertEquals("https://example.com/tab",repo.stream("123",480,budget).url)
@@ -79,15 +86,18 @@ class ContentRepositoryPlayerTest {
 
     @Test fun malformedResponseSurvivesMixedTimeoutOrRejectionWithoutLegacyOrRotation() {
         for(rejected in listOf(false,true)) {
-            var calls=0
+            val paths=mutableListOf<String>()
             val (repo,store)=repository { request ->
-                calls++
+                paths+=request.url.encodedPath
                 if(request.url.host.startsWith("api3-")) "{broken"
                 else if(rejected) """{"code":110001,"data":{}}"""
                 else throw java.net.SocketTimeoutException()
             }
             assertThrows(PlaybackModelException::class.java){repo.stream("123",480,PlaybackRequestBudget(8,0))}
-            assertEquals(2,calls);assertTrue(store.saved.isEmpty())
+            // 三条已注册 POST 线路都被真实尝试过；不得退化成 legacy 或身份轮换。
+            assertEquals(3,paths.size)
+            assertEquals(setOf(SHORTPLAY_PATH,PHOENIX_PATH,PRELOAD_PATH),paths.toSet())
+            assertTrue(store.saved.isEmpty())
         }
     }
 
@@ -102,28 +112,32 @@ class ContentRepositoryPlayerTest {
     }
 
     @Test fun incompatibleModelStopsWithoutLegacyFallbackOrIdentityRotation() {
-        var calls=0
+        val paths=mutableListOf<String>()
         val (repo,store)=repository { request ->
-            calls++
+            paths+=request.url.encodedPath
             val model=JSONObject().put("video_list",list(entry(480,"bytevc2","https://example.com/vvc")))
             JSONObject().put("code",0).put("data",if(request.url.host.startsWith("api3-")) JSONObject().put("video_model",model) else JSONObject().put("123",JSONObject().put("video_model",model))).toString()
         }
         val failure=assertThrows(IOException::class.java){repo.stream("123",480)}
         assertEquals("NoCompatibleStreamException",failure.javaClass.simpleName)
-        assertEquals(2,calls)
+        // 编码不兼容是模型结论：三条线路都要给出证据，之后才终止，且不换身份。
+        assertEquals(setOf(SHORTPLAY_PATH,PHOENIX_PATH,PRELOAD_PATH),paths.toSet())
         assertTrue(store.saved.isEmpty())
     }
 
     @Test fun failedEndpointsAndAutomaticRecoveryShareOneRequestCeiling() {
         var requests=0
         val (repo,_)=repository { request -> if(request.url.host.endsWith("fqnovel.com")) requests++;"""{"code":0,"data":{}}""" }
-        val budget=PlaybackRequestBudget(5,0)
+        // 三条 POST 线路 + 标签页兜底 + legacy 回退共用同一预算：首轮恰好 5 次。
+        val budget=PlaybackRequestBudget(6,0)
         assertThrows(Exception::class.java) {repo.stream("123",480,budget)}
-        assertEquals(4,requests)
-        assertThrows(PlaybackBudgetExceededException::class.java) {repo.stream("123",480,budget)}
         assertEquals(5,requests)
+        // 冷却半轮只探一条；此处 legacy 返回的是非空 data{}（不是确定性空体），仍按原语义继续，
+        // 想发第 7 次请求时被同一预算挡住，不越界重试。
         assertThrows(PlaybackBudgetExceededException::class.java) {repo.stream("123",480,budget)}
-        assertEquals(5,requests)
+        assertEquals(6,requests)
+        assertThrows(PlaybackBudgetExceededException::class.java) {repo.stream("123",480,budget)}
+        assertEquals(6,requests)
     }
 
     @Test fun shortplayModelListResolvesWithoutAnyFallbackCall() {
@@ -381,4 +395,44 @@ class ContentRepositoryPlayerTest {
         assertThrows(Exception::class.java) { repo.stream("123",720) }
         assertEquals(0,registrations)
     }
+
+    @Test fun preloadRouteReusesSavedIdentityAndPhoenixSignatureWithoutRotation() {
+        val seen=mutableListOf<Request>()
+        val (repo,store)=repository { request ->
+            seen+=request
+            when(request.url.encodedPath) {
+                PRELOAD_PATH -> """{"code":0,"data":{"123":{"video_model":{"video_list":{"v":{"vheight":720,"codec_type":"h264","main_url":"https://example.com/preload"}}}}}}"""
+                else -> """{"code":0,"data":{}}"""
+            }
+        }
+        assertEquals("https://example.com/preload",repo.stream("123",720,PlaybackRequestBudget(8,0)).url)
+        val phoenix=seen.single { it.url.encodedPath==PHOENIX_PATH }
+        val preload=seen.single { it.url.encodedPath==PRELOAD_PATH }
+        // 同一份已保存身份：不新注册、不改写 store。
+        assertEquals("POST",preload.method)
+        assertEquals(phoenix.url.query,preload.url.query)
+        assertEquals("7000000000001234567",preload.url.queryParameter("device_id"))
+        assertEquals("7000000000007654321",preload.url.queryParameter("iid"))
+        // 同一请求体 => 同一 x-ss-stub；签名头必须真实存在。
+        assertArrayEquals(phoenix.bodyBytes(),preload.bodyBytes())
+        assertEquals(phoenix.header("x-ss-stub"),preload.header("x-ss-stub"))
+        assertFalse(preload.header("x-ss-stub").isNullOrBlank())
+        for(name in listOf("x-argus","x-khronos","x-ladon")) assertFalse("$name 必须存在",preload.header(name).isNullOrBlank())
+        assertEquals(phoenix.header("Content-Type"),preload.header("Content-Type"))
+        assertTrue(store.saved.isEmpty())
+    }
+
+    @Test fun preloadRouteNeverPlaysNeighborEpisode() {
+        val (repo,store)=repository { request ->
+            when(request.url.encodedPath) {
+                PRELOAD_PATH -> """{"code":0,"data":{"999":{"video_model":{"video_list":{"v":{"vheight":720,"codec_type":"h264","main_url":"https://example.com/wrong"}}}}}}"""
+                else -> """{"code":0,"data":{}}"""
+            }
+        }
+        // 只带邻集模型的预加载线路不得产出可播地址，也不得因此换身份。
+        assertThrows(IOException::class.java) { repo.stream("123",720,PlaybackRequestBudget(8,0)) }
+        assertTrue(store.saved.isEmpty())
+    }
+
+    private fun Request.bodyBytes(): ByteArray = okio.Buffer().also { body!!.writeTo(it) }.readByteArray()
 }

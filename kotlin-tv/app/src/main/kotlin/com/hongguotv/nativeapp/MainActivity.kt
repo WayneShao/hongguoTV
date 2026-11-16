@@ -218,6 +218,8 @@ class MainActivity: Activity() {
     private val networkCleanup=Executors.newSingleThreadExecutor()
     private val preloadStatistics=PreloadStatistics.session
     private var playbackMeasurement: com.hongguotv.core.PlaybackSessionMeasurement?=null
+    private var bufferingDiagnostics: BufferingDiagnostics?=null
+    @Volatile private var playbackStage: com.hongguotv.core.PlaybackDiagnostics.Stage?=null
     private val preloadPreferences by lazy { PreloadPreferences(this) }
     private var preloadConfig=PreloadSettings()
     private val preloadClock=PreloadCheckClock()
@@ -269,6 +271,7 @@ class MainActivity: Activity() {
     private var playbackAnalytics: androidx.media3.exoplayer.analytics.AnalyticsListener?=null
     private val completedEpisodes=mutableSetOf<String>()
     private val rejectedQueueItems=mutableSetOf<String>()
+    private val playbackFailureSnapshot by lazy { PlaybackFailureSnapshot(java.io.File(filesDir,"playback-failure-snapshot.txt")) }
     private var currentEpisodeDuration=0L
     private lateinit var playbackTitle: TextView
     private var directPlayback=false
@@ -421,7 +424,7 @@ class MainActivity: Activity() {
                 player?.duration?.takeIf { it>0 }?.let { currentEpisodeDuration=it }
                 val buffering=player?.playbackState==Player.STATE_BUFFERING && requestedAutoplay && !pausedForLifecycle && episodePanel==null && !playError && !sleepStopped
                 if(bufferingWatchdog.poll(android.os.SystemClock.elapsedRealtime(),buffering,video?.deliveredBytes ?: 0L,player?.bufferedPosition ?: 0L)) {
-                    video?.cancelReads(); playerFailure(java.net.SocketTimeoutException("视频读取停滞超过 30 秒"))
+                    video?.cancelReads(); playerFailure(java.net.SocketTimeoutException("视频读取停滞超过 30 秒"),PlaybackFailureSnapshot.Origin.PLAYER_ERROR)
                 }
                 if(hud.visibility==View.VISIBLE) updatePlaybackText()
                 maybePrefetch()
@@ -436,7 +439,7 @@ class MainActivity: Activity() {
                         now=now,
                         frames=frames,
                         eligible=playbackReady && !waitingForFirstFrame && !playError && pendingSeek==null && p.isPlaying && hasWindowFocus() && p.playbackState==Player.STATE_READY && p.totalBufferedDuration>=5000
-                    )) { video?.cancelReads(); playerFailure(java.net.SocketTimeoutException("视频解码停滞超过 20 秒")) }
+                    )) { video?.cancelReads(); playerFailure(java.net.SocketTimeoutException("视频解码停滞超过 20 秒"),PlaybackFailureSnapshot.Origin.PLAYER_ERROR) }
                 }
                 if(player?.isPlaying==true && now-lastSaved>5000) { saveProgress(); lastSaved=now }
             }
@@ -468,6 +471,7 @@ class MainActivity: Activity() {
         super.onCreate(state)
         ContentRepository.deviceStore = PreferencesPlayerDeviceStore(getSharedPreferences("registered-player", Context.MODE_PRIVATE))
         ContentRepository.searchDeviceStore = PreferencesPlayerDeviceStore(getSharedPreferences("registered-search", Context.MODE_PRIVATE))
+        ContentRepository.mobileDeviceStore = PreferencesPlayerDeviceStore(getSharedPreferences("registered-player-v5", Context.MODE_PRIVATE))
         DeviceIdentity.configure(this)
         preloadConfig=preloadPreferences.load()
         AuthStore.restore(this,accountRepository)
@@ -1319,6 +1323,7 @@ class MainActivity: Activity() {
                         playEpisode(index,latest?.takeIf { it.episodeId==data.episodes[index] && !it.completed }?.position ?: 0)
                     }
                 }
+                EpisodeLabels.completion(item,done)
                 item.contentDescription=EpisodeLabels.description(index+1,index==episodeIndex,done); line.addView(item,lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }); episodes+=item
             }
             repeat(5-numbers.size) { line.addView(Space(this),lp(0,dp(42)).apply { weight=1f; rightMargin=dp(6) }) }
@@ -1410,17 +1415,21 @@ class MainActivity: Activity() {
         seasonGate.reset();seasonSeekToEnd=false
         updater.interrupt()
         val data=detail ?: return
+        val snapshotReplacing=screen=="player"
         val targetId=data.episodes.getOrNull(index)
         if(!recovering && position==0L && targetId!=null && !playError && playbackQueue?.nextMediaId==targetId) {
             saveProgress(); requestedAutoplay=autoplay; pausedForLifecycle=!autoplay; sleepStopped=false
             syncBoundaryPause()
             if(playbackQueue?.seekNext(targetId)==true) {
+                recordPlaybackEvent(PlaybackFailureSnapshot.Path.QUEUED_SEEK,index+1,data.episodes.size,playbackQueue?.remoteFor(targetId)?.isCacheComplete()==true)
                 if(autoplay) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 player?.playWhenReady=foreground && autoplay; return
             }
         }
         if(recovering && index==episodeIndex && video?.reusable==true && player!=null) {
+            recordPlaybackEvent(PlaybackFailureSnapshot.Path.REPLACE,index+1,data.episodes.size,video?.isCacheComplete()==true)
             cancelRecovery(); bufferingWatchdog.reset()
+            bufferingDiagnostics?.close(android.os.SystemClock.elapsedRealtime(),BufferingDiagnostics.Stop.CLOSED)
             player?.stop(); video?.cancelReads()
             playError=false; playbackReady=false; readySince=0; waitingForFirstFrame=true
             startPosition=position; requestedAutoplay=autoplay; pausedForLifecycle=!autoplay
@@ -1433,6 +1442,7 @@ class MainActivity: Activity() {
         library.setWatched(data.series.id,false)
         if(screen!="player" || recovering) { preloadClock.reset(); preloadCycle=false }
         val selectedIndex=index.coerceIn(0,data.episodes.lastIndex)
+        recordPlaybackEvent(if(snapshotReplacing) PlaybackFailureSnapshot.Path.REPLACE else PlaybackFailureSnapshot.Path.INITIAL,selectedIndex+1,data.episodes.size,video?.isCacheComplete()==true)
         val prefetchedModel=if(!recovering) takeBatchModel(data.episodes[selectedIndex],recoveryQuality?.takeIf { it.first==data.episodes[selectedIndex] }?.second ?: library.maxQuality) else null
         val prefetched=if(preloadConfig.enabled && !recovering) upcoming.claim("${data.episodes[selectedIndex]}:${recoveryQuality?.takeIf { it.first==data.episodes[selectedIndex] }?.second ?: library.maxQuality}") else null
         bufferingWatchdog.reset(); preloadGate.update(false,0,0); upcoming.yieldToForeground()
@@ -1449,8 +1459,11 @@ class MainActivity: Activity() {
         artwork.cancelPage(clearMemory=true)
         playbackHttp=null; video=null
         playbackMeasurement?.close(android.os.SystemClock.elapsedRealtime())
+        bufferingDiagnostics?.close(android.os.SystemClock.elapsedRealtime(),BufferingDiagnostics.Stop.SWITCH)
         val measurement=com.hongguotv.core.PlaybackSessionMeasurement(preloadStatistics,playbackStarted)
         playbackMeasurement=measurement
+        playbackStage=if(prefetched!=null) com.hongguotv.core.PlaybackDiagnostics.Stage.PREFETCH_WAIT else com.hongguotv.core.PlaybackDiagnostics.Stage.PREPARATION
+        bufferingDiagnostics=BufferingDiagnostics { android.util.Log.i("HongguoTV",it) }
         var firstReady=true; var firstFrame=true
         completedEpisodes.clear(); rejectedQueueItems.clear(); currentEpisodeDuration=0
         if(!recovering) { recovery.reset(); episodeRequestBudget=PlaybackRequestBudget() }
@@ -1485,13 +1498,18 @@ class MainActivity: Activity() {
         var acquiredCacheKind=0
         work({
             val cached=if(prefetched!=null) try { prefetched.await(1500) } catch(e: Exception) {
-                RequestScope.ensureActive(); null
+                val waitTimedOut=e is java.util.concurrent.TimeoutException
+                RequestScope.ensureActive()
+                if(waitTimedOut) android.util.Log.i("HongguoTV","${com.hongguotv.core.PlaybackDiagnostics.timeoutLine(com.hongguotv.core.PlaybackDiagnostics.Stage.PREFETCH_WAIT)} · 改用前台取流")
+                null
             } finally { prefetched.close() } else null
+            if(cached==null) playbackStage=com.hongguotv.core.PlaybackDiagnostics.Stage.PREPARATION
             cached?.also { acquiredCacheKind=if(it.isCacheComplete()) 2 else 1; it.promote() } ?: RemoteVideo(repository.http,prefetchedModel ?: repository.stream(requestedId,maxQuality,requestBudget),preloadGate).let {
                 try { it.prepare() } catch(e: Exception) { it.close(); throw e }
             }
         }, { remote ->
             playbackPreparation=null
+            playbackStage=com.hongguotv.core.PlaybackDiagnostics.Stage.TRANSPORT
             preloadStatistics.acquired(acquiredCacheKind)
             video=remote; quality=remote.info.quality
             val p=player ?: run {
@@ -1506,16 +1524,19 @@ class MainActivity: Activity() {
             p.setPlaybackSpeed(library.playbackSpeed)
             val listener=object: Player.Listener {
                 private fun active()=player===p && generation==ticket && screen=="player"
-                private fun measure() { measurement.state(android.os.SystemClock.elapsedRealtime(),p.playbackState==Player.STATE_BUFFERING,p.playWhenReady && foreground && !pausedForLifecycle && p.playbackSuppressionReason==Player.PLAYBACK_SUPPRESSION_REASON_NONE) }
+                private fun measure() {
+                    val now=android.os.SystemClock.elapsedRealtime()
+                    val buffering=p.playbackState==Player.STATE_BUFFERING
+                    val eligible=p.playWhenReady && foreground && !pausedForLifecycle && p.playbackSuppressionReason==Player.PLAYBACK_SUPPRESSION_REASON_NONE
+                    measurement.state(now,buffering,eligible)
+                    bufferingDiagnostics?.state(episodeIndex+1,now,buffering,eligible,(p.bufferedPosition-p.currentPosition).coerceAtLeast(0))
+                }
                 override fun onPlaybackStateChanged(state: Int) {
                     if(!active()) return
                     measure()
                     if(state!=Player.STATE_BUFFERING) bufferingWatchdog.reset()
                     if(state==Player.STATE_READY) {
-                        if(!p.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
-                            playerFailure(PlaybackException("资源没有可解码的视频轨道",null,PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED))
-                            return
-                        }
+                        recordPlaybackEvent(PlaybackFailureSnapshot.Path.READY,episodeIndex+1,data.episodes.size,video?.isCacheComplete()==true)
                         playbackReady=true
                         if(p.duration>0) currentEpisodeDuration=p.duration
                         if(readySince==0L) readySince=android.os.SystemClock.elapsedRealtime()
@@ -1525,8 +1546,17 @@ class MainActivity: Activity() {
                     syncMediaSession()
                     if(state==Player.STATE_ENDED) handlePlaybackEnded(data,p)
                 }
+                override fun onEvents(player: Player,events: Player.Events) {
+                    if(!active() || p.playbackState!=Player.STATE_READY || p.playerError!=null) return
+                    // A queued seek can temporarily expose EMPTY tracks while READY. Unknown is not unsupported.
+                    val tracks=p.currentTracks
+                    if(!tracks.isEmpty && !tracks.isTypeSelected(C.TRACK_TYPE_VIDEO)) {
+                        playerFailure(PlaybackException("资源没有可解码的视频轨道",null,PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED),PlaybackFailureSnapshot.Origin.NO_VIDEO_GUARD)
+                    }
+                }
                 override fun onRenderedFirstFrame() {
                     if(active() && firstFrame) {
+                        recordPlaybackEvent(PlaybackFailureSnapshot.Path.FIRST_FRAME,episodeIndex+1,data.episodes.size,video?.isCacheComplete()==true)
                         firstFrame=false; waitingForFirstFrame=false
                         if(!p.playWhenReady || !foreground) measurement.interrupted(android.os.SystemClock.elapsedRealtime())
                         measurement.firstFrame(android.os.SystemClock.elapsedRealtime())
@@ -1584,10 +1614,13 @@ class MainActivity: Activity() {
                 override fun onPlayerError(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,error: PlaybackException) {
                     if(player!==p || generation!=ticket) return
                     val failed=eventMediaId(eventTime)
+                    capturePlaybackFailure(error,PlaybackFailureSnapshot.Origin.PLAYER_ERROR,
+                        failed!=null && failed==p.currentMediaItem?.mediaId,
+                        failed!=null && failed==playbackQueue?.nextMediaId)
                     if(failed!=null && failed!=p.currentMediaItem?.mediaId && (failed==playbackQueue?.nextMediaId || failed in rejectedQueueItems)) {
                         rejectedQueueItems+=failed; playbackQueue?.dropNext()
                         p.prepare(); p.playWhenReady=foreground && requestedAutoplay && !pausedForLifecycle && !sleepStopped
-                    } else playerFailure(error)
+                    } else playerFailure(error,captured=true)
                 }
                 override fun onLoadError(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
                     loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
@@ -1626,12 +1659,14 @@ class MainActivity: Activity() {
         val index=data.episodes.indexOf(id)
         if(index<0 || index==episodeIndex) return
         val remote=playbackQueue?.remoteFor(id) ?: return
+        recordPlaybackEvent(PlaybackFailureSnapshot.Path.QUEUE_TRANSITION,index+1,data.episodes.size,remote.isCacheComplete())
         seasonGate.reset();seasonSeekToEnd=false
         preloadStatistics.acquired(2)
         episodeIndex=index; group=index/20; video=remote; quality=remote.info.quality
         upcoming.consumed("$id:${library.maxQuality}",remote)
         playbackQueue?.advanceTo(id)
         recovery.reset(); episodeRequestBudget=PlaybackRequestBudget(); bufferingWatchdog.reset()
+        bufferingDiagnostics?.switchEpisode(index+1,android.os.SystemClock.elapsedRealtime())
         startPosition=p.currentPosition.coerceAtLeast(0); readySince=android.os.SystemClock.elapsedRealtime()
         currentEpisodeDuration=p.duration.coerceAtLeast(0); playbackReady=p.playbackState==Player.STATE_READY
         pendingSeek=null; main.removeCallbacks(seekRunnable); playError=false
@@ -1824,9 +1859,11 @@ class MainActivity: Activity() {
         return true
     }
 
-    private fun playerFailure(problem: Throwable) {
+    private fun playerFailure(problem: Throwable,origin: PlaybackFailureSnapshot.Origin=PlaybackFailureSnapshot.Origin.PREPARATION_ERROR,captured: Boolean=false) {
         seasonGate.invalidate()
+        if(!captured) capturePlaybackFailure(problem,origin)
         if(playError) return
+        bufferingDiagnostics?.close(android.os.SystemClock.elapsedRealtime(),BufferingDiagnostics.Stop.ERROR)
         recoveryReason=when {
             generateSequence(problem){it.cause}.any { it is NoCompatibleStreamException } -> "本集未提供兼容的视频编码或清晰度"
             problem is java.net.SocketTimeoutException -> "视频读取或缓冲超时"
@@ -1854,9 +1891,9 @@ class MainActivity: Activity() {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
             autoRecovery=true; scheduleRecovery()
         }
-        android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else (problem.message?.let { " $it" } ?: "")))
+        android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else "")+(if(problem is PlaybackBudgetExceededException) " budget=true" else ""))
         controls.addView(text(com.hongguotv.core.PlaybackDiagnostics.line(problem,android.os.Build.MODEL,
-            android.os.Build.VERSION.RELEASE,android.os.Build.VERSION.SDK_INT,BuildConfig.VERSION_NAME,decoding,recovery.attempts),12f,muted))
+            android.os.Build.VERSION.RELEASE,android.os.Build.VERSION.SDK_INT,BuildConfig.VERSION_NAME,decoding,recovery.attempts,playbackStage),12f,muted))
     }
     private fun hidePlaybackOverlay() {
         main.removeCallbacks(hideHud)
@@ -2093,6 +2130,8 @@ class MainActivity: Activity() {
         cancelNextSeason()
         seasonGate.invalidate()
         playbackMeasurement?.close(android.os.SystemClock.elapsedRealtime()); playbackMeasurement=null
+        bufferingDiagnostics?.close(android.os.SystemClock.elapsedRealtime(),BufferingDiagnostics.Stop.CLOSED); bufferingDiagnostics=null
+        playbackStage=null
         bufferingWatchdog.reset()
         if(!keepUpcoming) cancelPrefetch()
         cancelRecovery(); mediaSession.deactivate(); tvTools.close()
@@ -2210,6 +2249,7 @@ class MainActivity: Activity() {
         cancelNextSeason()
         abandonSeasonContinuation()
         bufferingWatchdog.reset()
+        bufferingDiagnostics?.close(android.os.SystemClock.elapsedRealtime(),BufferingDiagnostics.Stop.BACKGROUND)
         accountScreen?.close(); accountHistorySync.flush()
         updater.pause(); notices.close()
         foreground=false; main.removeCallbacks(tick); cancelRecovery(); cancelPrefetch(); mediaSession.deactivate()
@@ -2242,5 +2282,56 @@ class MainActivity: Activity() {
         closeTransport(prefetchHttp); io.shutdownNow(); prefetchWorker.shutdownNow(); networkCleanup.shutdown()
         Thread({ repository.http.dispatcher.cancelAll(); repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown() },"hongguotv-network-cleanup").start()
         super.onDestroy()
+    }
+    override fun dump(prefix: String, fd: java.io.FileDescriptor?, writer: java.io.PrintWriter, args: Array<out String>?) {
+        super.dump(prefix, fd, writer, args)
+        refreshPlaybackSnapshotForDump()
+        com.hongguotv.core.PlaybackTrace.writeTo(writer)
+        playbackFailureSnapshot.writeTo(writer)
+    }
+    private fun recordPlaybackEvent(path: PlaybackFailureSnapshot.Path,ordinal: Int,count: Int,cacheComplete: Boolean) {
+        playbackFailureSnapshot.event(path,ordinal,count,preloadConfig.enabled,preloadConfig.batchModels,cacheComplete,playbackQueue?.nextMediaId!=null)
+        runCatching { playbackFailureSnapshot.current(playbackSnapshotLive()) }
+    }
+    private fun playbackSnapshotLive()=PlaybackFailureSnapshot.Live(
+        sourceCount=playbackQueue?.mediaIds?.size ?: -1,
+        nextPresent=playbackQueue?.nextMediaId!=null,
+        preloadEnabled=preloadConfig.enabled,
+        batchModels=preloadConfig.batchModels,
+        cacheComplete=video?.isCacheComplete()==true,
+        playerState=player?.playbackState ?: -1,
+        ordinal=episodeIndex+1,
+        episodeCount=detail?.episodes?.size ?: -1,
+        currentIndex=player?.currentMediaItemIndex ?: -1,
+        selectedVideoCount=player?.currentTracks?.groups.orEmpty().count { it.type==C.TRACK_TYPE_VIDEO && it.isSelected },
+    )
+    /** dump() runs on a binder thread; player access must hop to the main thread, bounded. */
+    private fun refreshPlaybackSnapshotForDump() {
+        val latch=java.util.concurrent.CountDownLatch(1)
+        val refresh={ runCatching { playbackFailureSnapshot.current(playbackSnapshotLive()) }; latch.countDown() }
+        if(android.os.Looper.myLooper()==android.os.Looper.getMainLooper()) refresh()
+        else runCatching {
+            main.post(refresh)
+            latch.await(250,java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
+    }
+    private fun capturePlaybackFailure(problem: Throwable,origin: PlaybackFailureSnapshot.Origin,eventCurrent: Boolean=false,eventNext: Boolean=false) {
+        runCatching {
+            val p=player
+            val selectedVideo=p?.currentTracks?.groups.orEmpty().filter { it.type==C.TRACK_TYPE_VIDEO && it.isSelected }
+            val currentFormat=selectedVideo.firstOrNull()?.let { group -> if(group.length>0) group.getTrackFormat(0) else null }
+            playbackFailureSnapshot.failure(origin,problem,PlaybackFailureSnapshot.Context(
+                sourceCount=playbackQueue?.mediaIds?.size ?: -1,
+                hasNext=playbackQueue?.nextMediaId!=null,
+                currentIndex=p?.currentMediaItemIndex ?: -1,
+                mediaItemCount=p?.mediaItemCount ?: -1,
+                playerState=p?.playbackState ?: -1,
+                playerErrorCode=p?.playerError?.errorCode ?: Int.MIN_VALUE,
+                positionMs=p?.currentPosition ?: -1L,
+                selectedVideoCount=selectedVideo.size,
+                currentFormat=currentFormat,
+            ),eventCurrent,eventNext)
+            playbackFailureSnapshot.current(PlaybackFailureSnapshot.Live(sourceCount=playbackQueue?.mediaIds?.size ?: -1,nextPresent=playbackQueue?.nextMediaId!=null,preloadEnabled=preloadConfig.enabled,batchModels=preloadConfig.batchModels,cacheComplete=video?.isCacheComplete()==true,playerState=p?.playbackState ?: -1,ordinal=episodeIndex+1,episodeCount=detail?.episodes?.size ?: -1,currentIndex=p?.currentMediaItemIndex ?: -1,selectedVideoCount=selectedVideo.size))
+        }
     }
 }

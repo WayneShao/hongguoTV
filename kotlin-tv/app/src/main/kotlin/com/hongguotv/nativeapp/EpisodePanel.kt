@@ -13,11 +13,17 @@ import android.widget.*
 
 /** Compact episode labels shared by the detail grid and the side panel. */
 object EpisodeLabels {
-    fun label(number: Int,completed: Boolean)=if(completed) "$number✓" else "$number"
+    /** Numeric text only; [completion] draws the mark so it does not depend on the installed font. */
+    @Suppress("UNUSED_PARAMETER")
+    fun label(number: Int,completed: Boolean)=number.toString()
     fun description(number: Int,current: Boolean,completed: Boolean)="第 $number 集"+(if(current) "，当前播放" else "")+(if(completed) "，已看完" else "")
     fun summary(count: Int,total: Int)="已看完 $count / $total 集"
     fun indexes(episodes: List<String>,completed: Set<String>)=episodes.withIndex().filter { it.value in completed }.mapTo(mutableSetOf()) { it.index }
     fun count(episodes: List<String>,completed: Set<String>)=episodes.count { it in completed }
+    /** Attaches the drawn check after the number, or clears it when the episode is not completed. */
+    fun completion(view: TextView,completed: Boolean) {
+        if(completed) TvTextGlyph.suffix(view,TvTextGlyph.Kind.CHECK) else TvTextGlyph.clear(view)
+    }
 }
 
 /** A remote-accessible side panel; selecting a number is the only action that changes episodes. */
@@ -69,6 +75,7 @@ class EpisodePanel(
                 val done=index in completed
                 val cell=button(EpisodeLabels.label(index+1,done),index==current) { select(index) }
                 cell.contentDescription=EpisodeLabels.description(index+1,index==current,done)
+                EpisodeLabels.completion(cell,done)
                 row.addView(cell,LinearLayout.LayoutParams(0,-2,1f).apply { setMargins(dp(3),dp(3),dp(3),dp(3)) }); cells+=cell
             }
             repeat(5-indexes.size) { row.addView(Space(activity),LinearLayout.LayoutParams(0,1,1f)) }

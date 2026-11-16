@@ -141,7 +141,7 @@ internal class DeviceRegistrar(
             .header("connection", "Keep-Alive")
             .post(ttEncrypt(gzip(body.toString().toByteArray()), randomBytes(32)).toRequestBody("application/octet-stream".toMediaType()))
             .build()
-        val raw = execute(http, request)
+        val raw = execute(http, request, PlaybackTrace.Route.REGISTER)
         val parsed = JSONObject(raw.toString(Charsets.UTF_8))
         val deviceId = pickString(parsed, "device_id_str", "device_id")
         val installId = pickString(parsed, "install_id_str", "install_id")
@@ -163,7 +163,7 @@ internal class DeviceRegistrar(
             .header("user-agent", di.userAgent)
             .header("connection", "Keep-Alive")
         for ((k, v) in PlayerSigner.registrationHeaders(query, null)) builder.header(k, v)
-        try { execute(http, builder.build()) } catch (e: Exception) { rethrowTerminal(e) }
+        try { execute(http, builder.build(), PlaybackTrace.Route.ALERT) } catch (e: Exception) { rethrowTerminal(e) }
     }
 
 
@@ -187,7 +187,7 @@ internal class DeviceRegistrar(
                 val signed = PlayerSigner.registrationHeaders(parts, payload)
                 val builder = request.newBuilder()
                 for ((k, v) in signed) builder.header(k, v)
-                val raw = execute(http, builder.build())
+                val raw = execute(http, builder.build(), PlaybackTrace.Route.REGISTER_KEY)
                 val key = JSONObject(raw.toString(Charsets.UTF_8)).optJSONObject("data")?.optString("key").orEmpty()
                 if (key.isEmpty()) throw java.io.IOException("注册密钥响应缺少 key")
                 return decryptRegisterKey(key).hex().uppercase()
@@ -204,8 +204,10 @@ internal class DeviceRegistrar(
         throw lastError ?: java.io.IOException("注册密钥失败")
     }
 
-    private fun execute(http: OkHttpClient, request: Request): ByteArray =
-        RequestScope.execute(http.newCall(request)) { response ->
+    private fun execute(http: OkHttpClient, request: Request, route: PlaybackTrace.Route): ByteArray {
+        PlaybackTrace.requestStart(route)
+        return try { RequestScope.execute(http.newCall(request)) { response ->
+            PlaybackTrace.response(response.code, response.body?.contentLength() ?: -1L)
             if (response.code == 401 || response.code == 403 || response.code == 10001 || response.code == 10002)
                 throw DeviceRejectedException("设备注册被拒绝（HTTP ${response.code}）")
             if (!response.isSuccessful) throw java.io.IOException("设备注册请求失败（HTTP ${response.code}）")
@@ -213,8 +215,13 @@ internal class DeviceRegistrar(
             val input = body.byteStream(); val out = ByteArrayOutputStream(); val buffer = ByteArray(8192)
             while (out.size() <= 4 * 1024 * 1024) { RequestScope.ensureActive(); val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
             if (out.size() > 4 * 1024 * 1024) throw java.io.IOException("设备注册响应过大")
+            PlaybackTrace.requestEnd(out.size().toLong(), true)
             out.toByteArray()
+        } } catch (error: Exception) {
+            PlaybackTrace.requestFail(PlaybackTrace.failureOf(error))
+            throw error
         }
+    }
 
     companion object {
         private const val PKG_NAME = "com.dragon.read"
