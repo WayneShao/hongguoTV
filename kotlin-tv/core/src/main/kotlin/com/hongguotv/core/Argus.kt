@@ -359,7 +359,16 @@ private fun decodeForm(value: String): String = runCatching {
 internal object PlayerSigner {
     const val LICENSE_ID = 1_611_921_764L
     private val random = SecureRandom()
-    fun headers(query: String, body: ByteArray?, ts: Long = System.currentTimeMillis() / 1000): Map<String, String> {
+    fun headers(query: String, body: ByteArray?, ts: Long = System.currentTimeMillis() / 1000): Map<String, String> =
+        signedHeaders(query, body, ts, queryParam(query, "iid").orEmpty())
+    /** Same headers plus the legacy gorgon used only while a device registers. */
+    fun registrationHeaders(query: String, body: ByteArray?, ts: Long = System.currentTimeMillis() / 1000): Map<String, String> {
+        val headers = LinkedHashMap(signedHeaders(query, body, ts, ""))
+        headers["x-gorgon"] = Gorgon8404.generate(query, ts, random.nextInt(256), random.nextInt(256))
+        return headers
+    }
+    /** Shared header composition; `installId` is Argus field 16 (playback: query iid, registration: empty). */
+    private fun signedHeaders(query: String, body: ByteArray?, ts: Long, installId: String): Map<String, String> {
         val aid = queryParam(query, "aid")?.toLongOrNull() ?: 1967L
         val stub = body?.takeIf { it.isNotEmpty() }?.let { digest("MD5", it).hex() }.orEmpty()
         val ladonRandom = ByteArray(4).also { random.nextBytes(it) }
@@ -367,15 +376,9 @@ internal object PlayerSigner {
             "x-ss-req-ticket" to (ts * 1000).toString(),
             "x-khronos" to ts.toString(),
             "x-ladon" to Ladon.encrypt(ts, LICENSE_ID, aid, ladonRandom),
-            "x-argus" to Argus.sign(query, stub, ts, aid, LICENSE_ID, queryParam(query, "device_id").orEmpty(), "", random.nextInt()),
+            "x-argus" to Argus.sign(query, stub, ts, aid, LICENSE_ID, queryParam(query, "device_id").orEmpty(), installId, random.nextInt()),
         )
         if (stub.isNotEmpty()) headers["x-ss-stub"] = stub
-        return headers
-    }
-    /** Same headers plus the legacy gorgon used only while a device registers. */
-    fun registrationHeaders(query: String, body: ByteArray?, ts: Long = System.currentTimeMillis() / 1000): Map<String, String> {
-        val headers = LinkedHashMap(headers(query, body, ts))
-        headers["x-gorgon"] = Gorgon8404.generate(query, ts, random.nextInt(256), random.nextInt(256))
         return headers
     }
 }

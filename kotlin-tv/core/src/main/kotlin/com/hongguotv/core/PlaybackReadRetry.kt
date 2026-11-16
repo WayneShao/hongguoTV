@@ -14,21 +14,36 @@ internal class EmptyPlaybackException(
     detail: String = reason.code,
 ): IOException("播放接口未返回有效数据 [$detail]")
 internal class PlaybackHttpException(val status: Int): IOException("播放请求失败（HTTP $status）")
-/** Per read budget: at most three total attempts; identity rotation is a separate transaction. */
-internal class PlaybackReadRetry(private val sleep: (Long)->Unit = Thread::sleep) {
+/**
+ * Per read budget: at most three total attempts; identity rotation is a separate transaction.
+ * retryBlank=false 用于已注册 POST 线路与共享预算的 LEGACY：空白响应立即交给下一条已注册线路或
+ * 候选验证，把重试额度留给不同线路；传输类瞬时失败的重试语义不变。
+ */
+internal class PlaybackReadRetry(
+    private val route: PlaybackTrace.Route? = null,
+    private val retryBlank: Boolean = true,
+    private val sleep: (Long)->Unit = Thread::sleep,
+) {
     fun read(block: ()->String): String {
         var transientRetried=false
         for(attempt in 0..2) {
             RequestScope.ensureActive()
             try {
-                return block().also { if(it.isBlank()) throw EmptyPlaybackException() }
+                return PlaybackTrace.withAttempt(attempt+1) { block() }.also {
+                    if(it.isBlank()) {
+                        route?.let { route -> PlaybackTrace.blank(route) }
+                        throw EmptyPlaybackException()
+                    }
+                }
             } catch(e: Exception) {
                 RequestScope.ensureActive()
                 val empty=e is EmptyPlaybackException
                 val temporary=e is java.net.SocketTimeoutException || e is java.net.SocketException ||
                     e is java.net.UnknownHostException || (e is PlaybackHttpException && e.status in setOf(500,502,503,504))
-                if(attempt==2 || (!empty && (!temporary || transientRetried))) throw e
-                if(PlaybackRequestBudget.current.get()?.retry()==false) throw e
+                if(attempt==2 || (empty && !retryBlank) || (!empty && (!temporary || transientRetried))) throw e
+                val allowed=PlaybackRequestBudget.current.get()?.retry() ?: true
+                route?.let { route -> PlaybackTrace.retry(route,attempt+1,PlaybackTrace.failureOf(e),allowed) }
+                if(!allowed) throw e
                 if(!empty) transientRetried=true
                 RequestScope.sleepWithinDeadline(if(attempt==0) 700 else 1500, sleep)
             }

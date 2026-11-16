@@ -20,14 +20,18 @@ internal class PlayerDeviceSource(
     private val store: () -> PlayerDeviceStore? = { ContentRepository.deviceStore },
     private val register: () -> PlayerDevice = { registrar.register(http) },
     private val recoverEmpty: Boolean = false,
+    /** Mobile v5 source: an empty slot registers one candidate under the shared lock instead of
+     * falling back to the legacy vendor identity. */
+    private val requireRegisteredDevice: Boolean = false,
     private val cooldownMillis: Long = 300_000,
     private val monotonicMillis: () -> Long = { System.nanoTime() / 1_000_000 },
     private val awaitLock: (java.util.concurrent.locks.ReentrantLock, Long) -> Boolean = { lock, wait ->
         lock.tryLock(wait, java.util.concurrent.TimeUnit.MILLISECONDS)
     },
 ) {
-    private fun activeDevice(): PlayerDevice {
-        val saved=store()?.load()?.let(PlayerDevice::fromJson)
+    private fun activeDevice(saved: PlayerDevice? = store()?.load()?.let(PlayerDevice::fromJson)): PlayerDevice {
+        PlaybackTrace.identity(PlaybackTrace.Identity.ACTIVE,
+            source = if(saved!=null) PlaybackTrace.Source.SAVED else PlaybackTrace.Source.DEFAULT)
         return saved ?: PlayerDevice(VendorConstants.device.getValue("device_id"),VendorConstants.device.getValue("iid"),"","","")
     }
     private class RecoveryState {
@@ -44,8 +48,10 @@ internal class PlayerDeviceSource(
     fun <T> recover(block: (PlayerDevice) -> T): T {
         // Ordinary reads never wait behind a slow candidate validation.
         val state = recoveryState()
+        val saved = store()?.load()?.let(PlayerDevice::fromJson)
+        if (requireRegisteredDevice && saved == null) return registerFirstUse(state, block)
         val epoch = synchronized(state) { state.epoch }
-        val active = activeDevice()
+        val active = activeDevice(saved)
         RequestScope.ensureActive()
         return try { block(active).also {
             RequestScope.ensureActive()
@@ -59,55 +65,160 @@ internal class PlayerDeviceSource(
                 synchronized(state) { if(state.epoch==epoch) state.emptyPoints=0 }
                 throw failure
             }
-            try {
-                while (true) {
-                    RequestScope.ensureActive()
-                    val remaining = RequestScope.remainingMillis()
-                    if (remaining != null && remaining <= 0) throw PlaybackDeadlineException()
-                    val wait = if (remaining == null) LOCK_WAIT_MILLIS else minOf(LOCK_WAIT_MILLIS, remaining)
-                    if (awaitLock(state.lock, wait)) break
-                }
-            } catch (interrupted: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw java.io.InterruptedIOException("请求已取消")
-            }
+            awaitStateLock(state)
             try {
                 RequestScope.ensureActive()
                 val latest = activeDevice()
-                if (latest != active) return block(latest)
+                if (latest != active) {
+                    PlaybackTrace.identity(PlaybackTrace.Identity.CANDIDATE,
+                        source = PlaybackTrace.Source.SAVED, trigger = PlaybackTrace.Trigger.IDENTITY_CHANGED)
+                    return block(latest)
+                }
                 synchronized(state) {
                     if(state.epoch!=epoch) throw failure
                     if(emptyFailure != null) {
                         // 半轮空虽只探到一条线路，持续出现同样说明当前身份拿不到数据；折半计入，
                         // 否则自动重试全程约 8.5 秒、远短于 30 秒线路冷却，候选轮换会被永远饿死。
                         state.emptyPoints += if(emptyFailure.completeRound) 2 else 1
+                        PlaybackTrace.identity(PlaybackTrace.Identity.EMPTY_THRESHOLD,
+                            trigger = PlaybackTrace.Trigger.EMPTY_THRESHOLD,
+                            emptyPoints = state.emptyPoints, cooldownMs = cooldownMillis)
                         if(state.emptyPoints < 4) throw failure
                     }
-                    if(emptyFailure != null && state.attemptedInFailurePeriod) throw failure
+                    if(emptyFailure != null && state.attemptedInFailurePeriod) {
+                        PlaybackTrace.identity(PlaybackTrace.Identity.COOLDOWN,
+                            trigger = PlaybackTrace.Trigger.COOLDOWN,
+                            emptyPoints = state.emptyPoints, cooldownMs = cooldownMillis,
+                            failure = PlaybackTrace.Failure.EMPTY)
+                        throw failure
+                    }
                     val now = monotonicMillis()
-                    if (state.lastAttempt?.let { now - it < cooldownMillis } == true) throw failure
+                    if (state.lastAttempt?.let { now - it < cooldownMillis } == true) {
+                        PlaybackTrace.identity(PlaybackTrace.Identity.COOLDOWN,
+                            trigger = PlaybackTrace.Trigger.COOLDOWN,
+                            emptyPoints = state.emptyPoints, cooldownMs = cooldownMillis,
+                            failure = PlaybackTrace.failureOf(failure))
+                        throw failure
+                    }
+                    // 预算已耗尽时注册出来的候选必然无法验证：本预算不注册，也不占用失败周期次数，
+                    // 让下一次手动重试带着新预算直接验证候选。
+                    val budget = PlaybackRequestBudget.current.get()
+                    if (budget != null && !budget.canReserve(if (requireRegisteredDevice) 2 else 1)) {
+                        PlaybackTrace.identity(PlaybackTrace.Identity.REGISTER_FAILED,
+                            trigger = PlaybackTrace.Trigger.REGISTER_FAILED,
+                            emptyPoints = state.emptyPoints, cooldownMs = cooldownMillis,
+                            failure = PlaybackTrace.Failure.BUDGET)
+                        throw failure
+                    }
                     state.lastAttempt = now
                     state.attemptedInFailurePeriod = true
                 }
-                val candidate = register()
+                val trigger = if (emptyFailure != null) PlaybackTrace.Trigger.EMPTY_THRESHOLD else PlaybackTrace.Trigger.DEVICE_REJECTED
+                val points = synchronized(state) { state.emptyPoints }
+                PlaybackTrace.identity(PlaybackTrace.Identity.REGISTER_START, trigger = trigger,
+                    emptyPoints = points, cooldownMs = cooldownMillis)
+                val candidate = try { register() } catch (e: Exception) {
+                    PlaybackTrace.identity(PlaybackTrace.Identity.REGISTER_FAILED, trigger = PlaybackTrace.Trigger.REGISTER_FAILED,
+                        emptyPoints = points, cooldownMs = cooldownMillis, failure = PlaybackTrace.failureOf(e))
+                    throw e
+                }
+                PlaybackTrace.identity(PlaybackTrace.Identity.CANDIDATE, source = PlaybackTrace.Source.SAVED,
+                    trigger = trigger, emptyPoints = points, cooldownMs = cooldownMillis)
                 RequestScope.ensureActive()
                 block(candidate).also {
                     RequestScope.ensureActive()
                     store()?.save(candidate.toJson())
                     synchronized(state) { state.emptyPoints=0; state.attemptedInFailurePeriod=false; state.epoch++ }
+                    PlaybackTrace.identity(PlaybackTrace.Identity.COMMITTED, source = PlaybackTrace.Source.SAVED,
+                        trigger = trigger, emptyPoints = 0)
                 }
             } finally { state.lock.unlock() }
         }
     }
 
+    /** Waits for the shared identity-transaction lock without ever outliving the 8 s deadline. */
+    private fun awaitStateLock(state: RecoveryState) {
+        try {
+            while (true) {
+                RequestScope.ensureActive()
+                val remaining = RequestScope.remainingMillis()
+                if (remaining != null && remaining <= 0) throw PlaybackDeadlineException()
+                val wait = if (remaining == null) LOCK_WAIT_MILLIS else minOf(LOCK_WAIT_MILLIS, remaining)
+                if (awaitLock(state.lock, wait)) return
+            }
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw java.io.InterruptedIOException("请求已取消")
+        }
+    }
+
+    /**
+     * First mobile-v5 use with an empty slot: register one anonymous candidate under the shared lock,
+     * validate it with the caller's own model request, and persist it only after that succeeds.
+     *
+     * Waiting is cancellation/deadline aware: a scope that is cancelled or expires before the lock is
+     * acquired never starts a registration, never records a failed attempt and never writes the slot.
+     * A real failed register/validation keeps the existing [cooldownMillis] back-off.
+     */
+    private fun <T> registerFirstUse(state: RecoveryState, block: (PlayerDevice) -> T): T {
+        awaitStateLock(state)
+        try {
+            RequestScope.ensureActive()
+            // Concurrent first use: the waiter reuses the identity the winner already validated.
+            store()?.load()?.let(PlayerDevice::fromJson)?.let { shared ->
+                PlaybackTrace.identity(PlaybackTrace.Identity.CANDIDATE, source = PlaybackTrace.Source.SAVED,
+                    trigger = PlaybackTrace.Trigger.IDENTITY_CHANGED)
+                return block(shared)
+            }
+            val now = monotonicMillis()
+            val budget = PlaybackRequestBudget.current.get()
+            synchronized(state) {
+                if (state.lastAttempt?.let { now - it < cooldownMillis } == true) {
+                    PlaybackTrace.identity(PlaybackTrace.Identity.COOLDOWN, trigger = PlaybackTrace.Trigger.COOLDOWN,
+                        cooldownMs = cooldownMillis, failure = PlaybackTrace.Failure.EMPTY)
+                    throw EmptyPlaybackException(detail = "stage=mobile-register cooldown")
+                }
+                // 注册与随后验证各占一个共享请求；不足两个就先不花掉其中一个。
+                if (budget != null && !budget.canReserve(2)) {
+                    PlaybackTrace.identity(PlaybackTrace.Identity.REGISTER_FAILED,
+                        trigger = PlaybackTrace.Trigger.REGISTER_FAILED, cooldownMs = cooldownMillis,
+                        failure = PlaybackTrace.Failure.BUDGET)
+                    throw PlaybackBudgetExceededException()
+                }
+                state.lastAttempt = now
+            }
+            PlaybackTrace.identity(PlaybackTrace.Identity.REGISTER_START, trigger = PlaybackTrace.Trigger.IDENTITY_CHANGED,
+                cooldownMs = cooldownMillis)
+            val candidate = try { register() } catch (e: Exception) {
+                PlaybackTrace.identity(PlaybackTrace.Identity.REGISTER_FAILED, trigger = PlaybackTrace.Trigger.REGISTER_FAILED,
+                    cooldownMs = cooldownMillis, failure = PlaybackTrace.failureOf(e))
+                throw e
+            }
+            PlaybackTrace.identity(PlaybackTrace.Identity.CANDIDATE, source = PlaybackTrace.Source.SAVED,
+                trigger = PlaybackTrace.Trigger.IDENTITY_CHANGED, cooldownMs = cooldownMillis)
+            RequestScope.ensureActive()
+            return block(candidate).also {
+                RequestScope.ensureActive()
+                store()?.save(candidate.toJson())
+                synchronized(state) { state.emptyPoints = 0; state.attemptedInFailurePeriod = false; state.epoch++; state.lastAttempt = null }
+                PlaybackTrace.identity(PlaybackTrace.Identity.COMMITTED, source = PlaybackTrace.Source.SAVED,
+                    trigger = PlaybackTrace.Trigger.IDENTITY_CHANGED, emptyPoints = 0)
+            }
+        } finally { state.lock.unlock() }
+    }
 
     companion object {
         private const val LOCK_WAIT_MILLIS = 100L
         private val recoveryStates = java.util.WeakHashMap<Any, RecoveryState>()
         // The shortplay video_model URL from fetchShortplayVideoModel.
         internal const val SHORTPLAY_URL = "https://api3-normal-sinfonlinea.fqnovel.com/novel/player/video_model/v1/?iid={install_id}&device_id={device_id}&aid=1967&app_name=novelapp&version_code=72132&version_name=7.2.1.32&device_platform=android&device_brand=Xiaomi&os_version=13&cdid={cdid}"
+        // The phoenix multi_video_model query; the preload route reuses it verbatim so both
+        // batch routes keep the same saved PlayerDevice and the same PlayerSigner input.
+        private const val PHOENIX_QUERY = "iid={install_id}&device_id={device_id}&ac=wifi&channel=update_64&aid=8662&app_name=novelread&version_code=71332&version_name=7.1.3.32&device_platform=android&os=android&ssmix=a&device_type=25053RT47C&device_brand=Redmi&language=zh&os_api=36&os_version=16&manifest_version_code=71332&resolution=1280*2772&dpi=520&update_version_code=71332&host_abi=arm64-v8a&dragon_device_type=phone&pv_player=71332&compliance_status=0&need_personal_recommend=1&player_so_load=1&is_android_pad_screen=0"
         // The phoenix multi_video_model URL from phoenix_player_url.
-        internal const val PHOENIX_URL = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/?iid={install_id}&device_id={device_id}&ac=wifi&channel=update_64&aid=8662&app_name=novelread&version_code=71332&version_name=7.1.3.32&device_platform=android&os=android&ssmix=a&device_type=25053RT47C&device_brand=Redmi&language=zh&os_api=36&os_version=16&manifest_version_code=71332&resolution=1280*2772&dpi=520&update_version_code=71332&host_abi=arm64-v8a&dragon_device_type=phone&pv_player=71332&compliance_status=0&need_personal_recommend=1&player_so_load=1&is_android_pad_screen=0"
+        internal const val PHOENIX_URL = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/?$PHOENIX_QUERY"
+        // The registered preload batch route; same identity, signature and body as phoenix.
+        internal const val PRELOAD_URL = "https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/?$PHOENIX_QUERY"
         internal const val FALLBACK_USER_AGENT = "com.xs.fm/632 (Linux; U; Android 15; zh_CN; 23049RAD8C; Build/AQ3A.250226.002; Cronet/TTNetVersion:fc4cebd3 2024-12-10 QuicVersion:d9628e3d 2024-10-11)"
 
         fun substituteDevice(url: String, device: PlayerDevice): String = url

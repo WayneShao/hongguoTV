@@ -51,7 +51,9 @@ class RequestScope {
         /** 为本次获取设置独立的截止时间；嵌套调用结束后恢复上层截止点。 */
         fun <T> withDeadline(millis: Long, action: () -> T): T {
             val previous = deadline.get()
-            deadline.set(monotonic() + millis.coerceAtLeast(0))
+            // 嵌套期限只能收紧不能放宽：子预算/可选补查绝不能替父级延长总截止点。
+            val requested = monotonic() + millis.coerceAtLeast(0)
+            deadline.set(if(previous == null) requested else minOf(previous, requested))
             try {
                 val result = action()
                 // 正文读取可能在上限前结束，但随后的解析/选流仍不得越过绝对截止时间。
@@ -61,6 +63,17 @@ class RequestScope {
         }
         /** 剩余毫秒数；未设置截止点时返回 null。 */
         fun remainingMillis(): Long? = deadline.get()?.let { (it - monotonic()).coerceAtLeast(0) }
+        /**
+         * 已有可播结果后的可选补查：内层期限严格短于当前剩余时间并预留返回开销，
+         * 绝不延长外层截止点；剩余不足时直接跳过而不是发起徒劳请求。
+         */
+        fun <T> withOptionalLimit(capMillis: Long, reserveMillis: Long = OPTIONAL_RETURN_RESERVE_MILLIS, action: () -> T): T {
+            // 已取消或父级总截止点已过时，一次可选请求都不该发起。
+            ensureActive()
+            val remaining = remainingMillis() ?: return withDeadline(capMillis, action)
+            if (remaining <= reserveMillis + OPTIONAL_MIN_WORK_MILLIS) throw PlaybackDeadlineException()
+            return withDeadline(minOf(capMillis, remaining - reserveMillis).coerceAtLeast(0), action)
+        }
         /** 可注入的等待，自动裁剪到剩余截止时间并在返回后复查取消与超时。 */
         fun sleepWithinDeadline(millis: Long, sleeper: (Long) -> Unit = Thread::sleep) {
             val remaining = remainingMillis()
@@ -82,5 +95,11 @@ class RequestScope {
                 return call.execute().use(consume)
             } finally { owner?.detach(call) }
         }
+        /** 可选补查的内层上限，短于 8 秒总预算；仅用于已有可播结果后的额外探测。 */
+        internal const val OPTIONAL_LOOKUP_TIMEOUT_MILLIS = 3_000L
+        /** 为返回已有结果预留的时间；可选补查不得占用。 */
+        internal const val OPTIONAL_RETURN_RESERVE_MILLIS = 800L
+        /** 剩余时间不足以完成一次有意义的可选请求时直接跳过。 */
+        private const val OPTIONAL_MIN_WORK_MILLIS = 300L
     }
 }

@@ -32,6 +32,10 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
     private val devices = PlayerDeviceSource(http, recoverEmpty = true)
     private val searchDevices = PlayerDeviceSource(http, store = { searchDeviceStore },
         register = { SearchDeviceRegistrar(http, clock).register() }, cooldownMillis = 0)
+    /** v5 mobile identity: a distinct persisted namespace, never the legacy aid-1967 profile. */
+    private val mobileDevices = PlayerDeviceSource(http, store = { mobileDeviceStore },
+        register = { MobileDeviceRegistrar().register(http) }, recoverEmpty = true,
+        requireRegisteredDevice = true)
     /** 每个匿名身份一份线路健康度，进程内有效、最多保留 8 份。 */
     private val routeHealth = object : LinkedHashMap<String, PlaybackRoutes>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PlaybackRoutes>?) = size > 8
@@ -44,23 +48,31 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
     private val site = "https://hongguoduanju.com"
     private data class SearchCursor(val deviceId: String, val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
-    private fun text(url: String, signed: Signer.Request? = null): String {
-        val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
-        signed?.headers?.forEach { (k,v) -> request.header(k,v) }
-        signed?.body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
-        PlaybackRequestBudget.current.get()?.request()
-        return RequestScope.execute((if(PlaybackRequestBudget.current.get()!=null) modelHttp else http).newCall(request.build())) { response ->
-            if (!response.isSuccessful) {
-                val error = response.body?.string().orEmpty()
-                if (isIdentityRisk(response.code, error)) throw DeviceIdentityRejectedException("设备标识被拒绝（HTTP ${response.code}）")
-                throw PlaybackHttpException(response.code)
+    private fun text(url: String, signed: Signer.Request? = null, route: PlaybackTrace.Route = PlaybackTrace.Route.LEGACY): String {
+        PlaybackTrace.requestStart(route)
+        try {
+            val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
+            signed?.headers?.forEach { (k,v) -> request.header(k,v) }
+            signed?.body?.let { request.post(it.toRequestBody("application/json; charset=utf-8".toMediaType())) }
+            PlaybackRequestBudget.current.get()?.request()
+            return RequestScope.execute((if(PlaybackRequestBudget.current.get()!=null) modelHttp else http).newCall(request.build())) { response ->
+                PlaybackTrace.response(response.code, response.body?.contentLength() ?: -1L)
+                if (!response.isSuccessful) {
+                    val error = response.body?.string().orEmpty()
+                    if (isIdentityRisk(response.code, error)) throw DeviceIdentityRejectedException("设备标识被拒绝（HTTP ${response.code}）")
+                    throw PlaybackHttpException(response.code)
+                }
+                val body = response.body ?: throw IOException("内容响应为空")
+                if (body.contentLength() > 16*1024*1024) throw IOException("内容响应过大")
+                val input=body.byteStream(); val out=java.io.ByteArrayOutputStream(); val buffer=ByteArray(8192)
+                while(out.size()<=16*1024*1024) { RequestScope.ensureActive(); val n=input.read(buffer); if(n<0) break; out.write(buffer,0,n) }; val bytes=out.toByteArray()
+                if(bytes.size > 16*1024*1024) throw IOException("内容响应过大")
+                PlaybackTrace.requestEnd(bytes.size.toLong(), true)
+                String(bytes,Charsets.UTF_8)
             }
-            val body = response.body ?: throw IOException("内容响应为空")
-            if (body.contentLength() > 16*1024*1024) throw IOException("内容响应过大")
-            val input=body.byteStream(); val out=java.io.ByteArrayOutputStream(); val buffer=ByteArray(8192)
-            while(out.size()<=16*1024*1024) { RequestScope.ensureActive(); val n=input.read(buffer); if(n<0) break; out.write(buffer,0,n) }; val bytes=out.toByteArray()
-            if(bytes.size > 16*1024*1024) throw IOException("内容响应过大")
-            String(bytes,Charsets.UTF_8)
+        } catch (e: Exception) {
+            PlaybackTrace.requestFail(PlaybackTrace.failureOf(e))
+            throw e
         }
     }
     private fun router(url: String) = extractRouter(text(url)).getJSONObject("loaderData")
@@ -361,19 +373,56 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
         if(episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size!=episodes.size) throw IOException("分集数据异常")
         return Detail(card(o).copy(id=id),episodes)
     }
-    fun stream(id: String, maxQuality: Int = 1080, budget: PlaybackRequestBudget=PlaybackRequestBudget()): StreamInfo = budget.run { streamWithinBudget(id,maxQuality) }
+    fun stream(id: String, maxQuality: Int = 1080, budget: PlaybackRequestBudget=PlaybackRequestBudget()): StreamInfo = budget.run {
+        PlaybackTrace.root(budget.traceOrdinal) { streamWithinBudget(id,maxQuality) }
+    }
     private fun streamWithinBudget(id: String,maxQuality: Int): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
+        // v5 mobile is the primary path whenever the mobile namespace is wired; it is not mixed
+        // with the legacy 3-route chain so a stale legacy identity can never mask a fresh profile.
+        if (mobileDeviceStore != null) return mobileDevices.recover { device -> mobileStream(id, maxQuality, device) }
         if (deviceStore != null) {
             try { return devices.recover { device -> playerStream(id, maxQuality, device) } }
             catch (e: Exception) {
                 RequestScope.ensureActive()
                 if(PlaybackFailure.terminal(e)) throw e
-                // Recovery is shared by store; do not bypass its cooldown or one-candidate limit.
-                return streamOnce(id, maxQuality)
+                // Keep the swallowed registered-route failure; legacy may still succeed for another reason.
+                PlaybackTrace.registeredFailure(e)
+                val budget = PlaybackRequestBudget.current.get()
+                // LEGACY 用固定身份，同一预算内结果不再变化：已确定性为空就不再重复消耗请求。
+                if (e is EmptyPlaybackException && budget?.legacyEmpty() == true) {
+                    PlaybackTrace.retry(PlaybackTrace.Route.LEGACY, 1, PlaybackTrace.Failure.EMPTY, false)
+                    throw e
+                }
+                try { return streamOnce(id, maxQuality, retryBlank = false) }
+                catch (legacy: EmptyPlaybackException) { budget?.markLegacyEmpty(); throw legacy }
             }
         }
         return runWithIdentityRecovery { streamOnce(id, maxQuality) }
+    }
+
+    /** The v5 query needs only the mobile identity triple; cdid falls back to iid, memory-only. */
+    private fun mobileValues(device: PlayerDevice): Map<String, String> = mapOf(
+        "device_id" to device.deviceId,
+        "iid" to device.installId,
+        "cdid" to device.cdid.ifEmpty { device.installId },
+    )
+
+    /** Primary v5 mobile path: one signed model request, then local quality selection. */
+    private fun mobileStream(id: String, maxQuality: Int, device: PlayerDevice): StreamInfo {
+        // modelHttp disables retryOnConnectionFailure so one logical request always maps to one
+        // physical call, keeping the shared budget accounting honest.
+        val model = MobilePlayback.fetch(id, mobileValues(device), modelHttp, PlaybackRequestBudget.current.get())
+        if (model.variants.isEmpty()) {
+            // Non-empty renditions mean a real model whose rows are not locally playable (bytevc2 or
+            // malformed), which must be reported as incompatible rather than as an empty response.
+            PlaybackTrace.parser(PlaybackTrace.Route.MOBILE, PlaybackTrace.Parser.INCOMPATIBLE)
+            PlaybackTrace.result(PlaybackTrace.Route.MOBILE, PlaybackTrace.Parser.INCOMPATIBLE, PlaybackTrace.Failure.MODEL)
+            throw NoCompatibleStreamException()
+        }
+        val chosen = StreamModels.pick(model.variants, maxQuality)
+            ?: throw NoCompatibleStreamException()
+        return streamInfo(chosen, maxQuality, model.variants)
     }
 
     private fun playerStream(id: String, maxQuality: Int, device: PlayerDevice): StreamInfo {
@@ -388,52 +437,125 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
         val requests = mapOf(
             PlaybackRoutes.SHORTPLAY to Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.SHORTPLAY_URL, device), PlayerDeviceSource.shortplayBody(id), mapOf("User-Agent" to "com.dragon.read", "Content-Type" to "application/json; charset=utf-8")),
             PlaybackRoutes.PHOENIX to Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.PHOENIX_URL, device), PlayerDeviceSource.phoenixBody(id), mapOf("User-Agent" to VendorConstants.VIDEO_UA, "Accept" to "application/json; charset=utf-8,application/x-protobuf", "Content-Type" to "application/json", "x-xs-from-web" to "0", "sdk-version" to "2")),
+            // 预加载线路与凤凰同身份、同请求体、同签名字段，仅路径不同；不得在此重注册身份。
+            PlaybackRoutes.PRELOAD to Triple(PlayerDeviceSource.substituteDevice(PlayerDeviceSource.PRELOAD_URL, device), PlayerDeviceSource.phoenixBody(id), mapOf("User-Agent" to VendorConstants.VIDEO_UA, "Accept" to "application/json; charset=utf-8,application/x-protobuf", "Content-Type" to "application/json", "x-xs-from-web" to "0", "sdk-version" to "2")),
         )
         val routes = routesFor(device)
         val plan = routes.plan(routeNow())
-        for (routeId in plan.routes) {
+        /**
+         * 已有可播行时，fallback_api 只用于可选补全；否则仍是必需取流，使用原总期限。
+         */
+        fun modelFallback(url: String): JSONObject? {
+            RequestScope.ensureActive()
+            val optional = StreamModels.pick(rows, maxQuality) != null
+            if (optional && PlaybackRequestBudget.current.get()?.canRequest() == false) return null
+            return try {
+                if (optional) RequestScope.withOptionalLimit(RequestScope.OPTIONAL_LOOKUP_TIMEOUT_MILLIS) { fallbackInfo(url) }
+                else fallbackInfo(url)
+            } catch (e: Exception) {
+                // 取消与父级总截止点永远优先；其余只降级为“不补全”，也不记成线路空响应。
+                RequestScope.ensureActive()
+                if (e is PlaybackBudgetExceededException || e is PlaybackDeadlineException) {
+                    if (!optional) throw e
+                    return null
+                }
+                if (PlaybackFailure.terminal(e)) throw e
+                transportFailure = e
+                null
+            }
+        }
+        /** 探测单条线路：拿到可播结果就返回，未拿到（空/软空）返回 null 交给下一条线路。 */
+        fun attempt(routeId: Int): StreamInfo? {
             val (url, body, headers) = requests.getValue(routeId)
+            val route = PlaybackTrace.routeOf(routeId)
             try {
                 val signed = PlayerSigner.headers(url.substringAfter('?', ""), body)
-                val data = playerJson(PlaybackReadRetry().read { fetch(url, headers + signed, body) })
+                val data = try {
+                    playerJson(PlaybackReadRetry(route = route, retryBlank = false).read { fetch(url, headers + signed, body, route) })
+                } catch (e: PlaybackModelException) {
+                    PlaybackTrace.parser(route, PlaybackTrace.Parser.MODEL_INVALID)
+                    throw e
+                }
                 val rawCode = if (data.has("code")) data.opt("code") else if (data.has("Code")) data.opt("Code") else null
-                val code = rawCode?.toString()?.toIntOrNull() ?: throw PlaybackModelException("播放状态格式异常")
+                val code = rawCode?.toString()?.toIntOrNull() ?: run {
+                    PlaybackTrace.parser(route, PlaybackTrace.Parser.MODEL_INVALID)
+                    throw PlaybackModelException("播放状态格式异常")
+                }
+                PlaybackTrace.businessCode(route, code)
                 if (code == 10001 || code == 10002 || code == 110001) throw DeviceRejectedException("播放接口拒绝该设备")
                 sawResponse = true
-                if (code != 0) throw IOException("播放接口暂不可用")
-                if(!data.has("data")) throw PlaybackModelException("播放响应缺少 data")
+                if (code != 0) {
+                    PlaybackTrace.failure(route, PlaybackTrace.Failure.HTTP)
+                    throw IOException("播放接口暂不可用")
+                }
+                if(!data.has("data")) { PlaybackTrace.parser(route, PlaybackTrace.Parser.MODEL_INVALID); throw PlaybackModelException("播放响应缺少 data") }
                 val payload = data.optJSONObject("data")
-                if (payload == null && !data.isNull("data")) throw PlaybackModelException("播放数据格式异常")
-                if (payload == null || payload.length() == 0) { emptyRoutes.add(routeId); emptyReasons[routeId] = EmptyPlaybackReason.DATA_EMPTY; routes.failed(routeId, routeNow(), true); continue }
+                if (payload == null && !data.isNull("data")) { PlaybackTrace.parser(route, PlaybackTrace.Parser.MODEL_INVALID); throw PlaybackModelException("播放数据格式异常") }
+                if (payload == null || payload.length() == 0) { PlaybackTrace.parser(route, PlaybackTrace.Parser.DATA_EMPTY); emptyRoutes.add(routeId); emptyReasons[routeId] = EmptyPlaybackReason.DATA_EMPTY; routes.failed(routeId, routeNow(), true); return null }
                 // 直连模型只属于稳定的 0 号线路，不能按当前排序位置判断。
                 val models = StreamModels.models(payload, id, allowDirect = routeId == PlaybackRoutes.SHORTPLAY)
                 if (models.isEmpty()) {
                     val entry = payload.optJSONObject(id) ?: if (routeId == PlaybackRoutes.SHORTPLAY && payload.has("video_model")) payload else null
-                    if (entry != null && entry.has("video_model") && (entry.isNull("video_model") || entry.opt("video_model") == "")) { emptyRoutes.add(routeId); emptyReasons[routeId] = EmptyPlaybackReason.VIDEO_MODEL_EMPTY; routes.failed(routeId, routeNow(), true); continue }
+                    if (entry != null && entry.has("video_model") && (entry.isNull("video_model") || entry.opt("video_model") == "")) { PlaybackTrace.parser(route, PlaybackTrace.Parser.VIDEO_MODEL_EMPTY); emptyRoutes.add(routeId); emptyReasons[routeId] = EmptyPlaybackReason.VIDEO_MODEL_EMPTY; routes.failed(routeId, routeNow(), true); return null }
+                    PlaybackTrace.parser(route, PlaybackTrace.Parser.MODEL_INVALID)
                     throw PlaybackModelException("播放模型缺失或分集不匹配")
                 }
                 for (model in models) {
                     val countBefore=rows.size
                     rows += StreamModels.listRows(model.optJSONObject("video_list"), StreamModels.keySeed(model))
                     rows += StreamModels.arrayRows(model.optJSONArray("video_list"))
-                    if(rows.size==countBefore && (model.optJSONObject("video_list")?.length() ?: model.optJSONArray("video_list")?.length() ?: 0)>0) incompatibleModel=true
-                    if (rows.any { it.quality == maxQuality }) { routes.success(routeId, routeNow()); return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows) }
+                    if(rows.size==countBefore && (model.optJSONObject("video_list")?.length() ?: model.optJSONArray("video_list")?.length() ?: 0)>0) {
+                        incompatibleModel=true
+                        PlaybackTrace.parser(route, PlaybackTrace.Parser.INCOMPATIBLE)
+                    }
+                    if (rows.any { it.quality == maxQuality }) { PlaybackTrace.parser(route, PlaybackTrace.Parser.SUCCESS); routes.success(routeId, routeNow()); return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows) }
                     val fallbackUrl = StreamModels.fallbackApiUrl(model)
-                    if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) { emptyRoutes.add(routeId); emptyReasons.putIfAbsent(routeId, EmptyPlaybackReason.LIST_EMPTY) }
-                    if (fallbackUrl.startsWith("https://")) runCatching {
-                        val info = fallbackInfo(fallbackUrl)
-                        rows += StreamModels.listRows(info?.optJSONObject("video_list"), info?.str("key_seed")?.takeIf { it.isNotEmpty() }?.let(StreamModels::lenientB64))
-                    }.onFailure { if(PlaybackFailure.terminal(it)) throw it; RequestScope.ensureActive(); transportFailure=it as? Exception ?: IOException("备用资源失败",it) }
+                    if (model.length() == 0 || ((model.optJSONObject("video_list")?.length() == 0 || model.optJSONArray("video_list")?.length() == 0) && fallbackUrl.isEmpty())) { PlaybackTrace.parser(route, PlaybackTrace.Parser.LIST_EMPTY); emptyRoutes.add(routeId); emptyReasons.putIfAbsent(routeId, EmptyPlaybackReason.LIST_EMPTY) }
+                    if (fallbackUrl.startsWith("https://")) modelFallback(fallbackUrl)?.let { info ->
+                        rows += StreamModels.listRows(info.optJSONObject("video_list"), info.str("key_seed").takeIf { it.isNotEmpty() }?.let(StreamModels::lenientB64))
+                    }
                 }
-                if (rows.any { it.quality == maxQuality }) { routes.success(routeId, routeNow()); return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows) }
+                if (rows.any { it.quality == maxQuality }) { PlaybackTrace.parser(route, PlaybackTrace.Parser.SUCCESS); routes.success(routeId, routeNow()); return streamInfo(StreamModels.pick(rows, maxQuality)!!, maxQuality, rows) }
                 // 有响应且非空即为线路健康；清晰度不匹配属于模型问题，不降级线路。
                 if (routeId in emptyRoutes) routes.failed(routeId, routeNow(), true) else routes.success(routeId, routeNow())
-            } catch (e: DeviceRejectedException) { rejected = true }
-            catch (e: EmptyPlaybackException) { emptyRoutes.add(routeId); emptyReasons.putIfAbsent(routeId, e.reason); routes.failed(routeId, routeNow(), true) }
+            } catch (e: DeviceRejectedException) {
+                PlaybackTrace.failure(route, PlaybackTrace.Failure.DEVICE_REJECTED)
+                rejected = true
+            }
+            catch (e: EmptyPlaybackException) {
+                PlaybackTrace.failure(route, PlaybackTrace.Failure.EMPTY, PlaybackTrace.parserOf(e.reason))
+                emptyRoutes.add(routeId); emptyReasons.putIfAbsent(routeId, e.reason); routes.failed(routeId, routeNow(), true)
+            }
             catch (e: Exception) {
                 RequestScope.ensureActive()
+                PlaybackTrace.failure(route, PlaybackTrace.failureOf(e), PlaybackTrace.parserOf(e))
                 if(e is PlaybackBudgetExceededException || e is PlaybackDeadlineException) throw e
                 if(PlaybackFailure.terminal(e)) terminalFailure=e else { transportFailure = e; routes.failed(routeId, routeNow(), false) }
+            }
+            return null
+        }
+        for (routeId in plan.routes) {
+            // 已经拿到可播行后，剩余线路只是可选补查：内层期限更短且预留返回时间，
+            // 可选线路既不能拖住返回，也不能把已校验的行换成一个超时。
+            val existing = StreamModels.pick(rows, maxQuality)?.let { streamInfo(it, maxQuality, rows) }
+            if (existing != null) {
+                // 明知预算已满就不要发起一次必败的可选请求；直接沿用已有行（仍先复查取消/总截止点）。
+                if (PlaybackRequestBudget.current.get()?.canRequest() == false) {
+                    RequestScope.ensureActive()
+                    return existing
+                }
+            }
+            try {
+                val found = if (existing == null) attempt(routeId)
+                    else RequestScope.withOptionalLimit(RequestScope.OPTIONAL_LOOKUP_TIMEOUT_MILLIS) { attempt(routeId) }
+                if (found != null) return found
+            } catch (e: Exception) {
+                // 取消与总截止点永远优先于已拿到的行；本次尝试中途新解析出的行同样有效，
+                // 但返回前必须复查外层截止点，绝不接受截止点之后才解析出的行。
+                RequestScope.ensureActive()
+                val latest = StreamModels.pick(rows, maxQuality)?.let { streamInfo(it, maxQuality, rows) }
+                if (latest != null) return latest
+                throw e
             }
         }
         val chosen = StreamModels.pick(rows, maxQuality)
@@ -456,9 +578,16 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
             }
         return streamInfo(chosen, maxQuality, rows)
     }
-    /** Single-episode fallback, only after two definitive empty endpoint results.
+    /** Single-episode fallback, only after all three registered POST routes returned definitive empty results.
      * One GET per shared foreground budget; never picks another episode's model. */
-    private fun tabStream(id: String,maxQuality: Int,device: PlayerDevice): StreamInfo {
+    private fun tabStream(id: String,maxQuality: Int,device: PlayerDevice): StreamInfo =
+        try {
+            tabStreamBody(id,maxQuality,device).also { PlaybackTrace.result(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.SUCCESS, PlaybackTrace.Failure.NONE) }
+        } catch (e: Exception) {
+            PlaybackTrace.result(PlaybackTrace.Route.TAB, PlaybackTrace.parserOf(e), PlaybackTrace.failureOf(e))
+            throw e
+        }
+    private fun tabStreamBody(id: String,maxQuality: Int,device: PlayerDevice): StreamInfo {
         val values=VendorConstants.device.toMutableMap().apply {
             put("device_id",device.deviceId);put("iid",device.installId)
             put("version_code","71532");put("version_name","7.1.5.32")
@@ -471,25 +600,33 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
         val headers=PlayerSigner.headers(url.substringAfter('?',""),null).toMutableMap().apply {
             put("User-Agent",VendorConstants.VIDEO_UA);put("Accept","application/json; charset=utf-8")
         }
-        val raw=fetch(url,headers,null)
-        if(raw.isBlank()) throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_RAW_BLANK)
-        val data=playerJson(raw)
+        val raw=fetch(url,headers,null,PlaybackTrace.Route.TAB)
+        if(raw.isBlank()) { PlaybackTrace.parser(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.TAB_RAW_BLANK); throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_RAW_BLANK) }
+        val data=try { playerJson(raw) } catch (e: PlaybackModelException) { PlaybackTrace.parser(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.MODEL_INVALID); throw e }
         val code=(if(data.has("code")) data.opt("code") else data.opt("Code"))?.toString()?.toIntOrNull()
-            ?: throw PlaybackModelException("备用播放状态格式异常")
-        if(code!=0) throw IOException("备用播放接口暂不可用")
-        val payload=data.optJSONObject("data") ?: throw PlaybackModelException("备用播放数据格式异常")
-        if(payload.length()==0) throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_DATA_EMPTY)
+            ?: run { PlaybackTrace.parser(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.MODEL_INVALID); throw PlaybackModelException("备用播放状态格式异常") }
+        PlaybackTrace.businessCode(PlaybackTrace.Route.TAB, code)
+        if(code!=0) { PlaybackTrace.failure(PlaybackTrace.Route.TAB, PlaybackTrace.Failure.HTTP); throw IOException("备用播放接口暂不可用") }
+        val payload=data.optJSONObject("data") ?: run { PlaybackTrace.parser(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.MODEL_INVALID); throw PlaybackModelException("备用播放数据格式异常") }
+        if(payload.length()==0) { PlaybackTrace.parser(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.TAB_DATA_EMPTY); throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_DATA_EMPTY) }
         val map=payload.optJSONObject("video_model_data") ?: payload
         val models=StreamModels.models(map,id,false)
-        if(models.isEmpty()) throw PlaybackModelException("备用播放模型缺失或分集不匹配")
+        if(models.isEmpty()) { PlaybackTrace.parser(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.MODEL_INVALID); throw PlaybackModelException("备用播放模型缺失或分集不匹配") }
         val rows=models.flatMap { StreamModels.listRows(it.optJSONObject("video_list"),StreamModels.keySeed(it))+StreamModels.arrayRows(it.optJSONArray("video_list")) }
-        if(models.all { it.length()==0 || ((it.optJSONObject("video_list")?.length() ?: it.optJSONArray("video_list")?.length() ?: -1)==0 && StreamModels.fallbackApiUrl(it).isEmpty()) }) throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_LIST_EMPTY)
-        val selected=StreamModels.pick(rows,maxQuality) ?: throw NoCompatibleStreamException()
+        if(models.all { it.length()==0 || ((it.optJSONObject("video_list")?.length() ?: it.optJSONArray("video_list")?.length() ?: -1)==0 && StreamModels.fallbackApiUrl(it).isEmpty()) }) { PlaybackTrace.parser(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.TAB_LIST_EMPTY); throw EmptyPlaybackException(reason = EmptyPlaybackReason.TAB_LIST_EMPTY) }
+        val selected=StreamModels.pick(rows,maxQuality) ?: run { PlaybackTrace.parser(PlaybackTrace.Route.TAB, PlaybackTrace.Parser.INCOMPATIBLE); throw NoCompatibleStreamException() }
         return streamInfo(selected,maxQuality,rows)
     }
 
-    private fun fallbackInfo(url: String,userAgent: String=PlayerDeviceSource.FALLBACK_USER_AGENT): JSONObject {
-        fun read(target: String): JSONObject = playerJson(fetch(target, mapOf("User-Agent" to userAgent,"Accept-Language" to "zh-CN,zh;q=0.9"), null))
+    private fun fallbackInfo(url: String,userAgent: String=PlayerDeviceSource.FALLBACK_USER_AGENT): JSONObject =
+        try {
+            fallbackInfoBody(url,userAgent).also { PlaybackTrace.result(PlaybackTrace.Route.FALLBACK, PlaybackTrace.Parser.SUCCESS, PlaybackTrace.Failure.NONE) }
+        } catch (e: Exception) {
+            PlaybackTrace.result(PlaybackTrace.Route.FALLBACK, PlaybackTrace.parserOf(e), PlaybackTrace.failureOf(e))
+            throw e
+        }
+    private fun fallbackInfoBody(url: String,userAgent: String): JSONObject {
+        fun read(target: String): JSONObject = playerJson(fetch(target, mapOf("User-Agent" to userAgent,"Accept-Language" to "zh-CN,zh;q=0.9"), null, PlaybackTrace.Route.FALLBACK))
             .optJSONObject("video_info")?.optJSONObject("data") ?: throw PlaybackModelException("没有播放资源")
         val original=read(url)
         if(!StreamModels.allByteVc2(original) || PlaybackRequestBudget.current.get()?.claimCodecFallback()!=true) return original
@@ -506,27 +643,42 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
     private fun playerJson(raw: String): JSONObject = try { JSONObject(raw) }
         catch(error: org.json.JSONException) { throw PlaybackModelException("播放响应格式异常") }
 
-    private fun streamInfo(chosen: PlayerVariant, maxQuality: Int, rows: List<PlayerVariant>): StreamInfo {
+    internal fun streamInfo(chosen: PlayerVariant, maxQuality: Int, rows: List<PlayerVariant>): StreamInfo {
         val quality = if (chosen.quality > 0) "${chosen.quality}P" + (if (chosen.quality > maxQuality) "（兼容资源）" else "") else "自动"
         return StreamInfo(chosen.url, chosen.key, quality, rows.map { it.quality }.filter { it>0 }.distinct().sortedDescending(), chosen.quality)
     }
-    private fun fetch(url: String, headers: Map<String, String>, body: ByteArray?): String {
-        val request = Request.Builder().url(url).header("Accept-Language", "zh-CN,zh;q=0.9")
-        headers.forEach { (k, v) -> request.header(k, v) }
-        body?.let { request.post(it.toRequestBody("application/json; charset=UTF-8".toMediaType())) }
-        PlaybackRequestBudget.current.get()?.request()
-        return RequestScope.execute((if(PlaybackRequestBudget.current.get()!=null) modelHttp else http).newCall(request.build())) { response ->
-            if (response.code == 401 || response.code == 403) throw DeviceRejectedException("播放请求被拒绝（HTTP ${response.code}）")
-            if (!response.isSuccessful) throw PlaybackHttpException(response.code)
-            val bodyStream = response.body ?: throw IOException("内容响应为空")
-            if (bodyStream.contentLength() > 16 * 1024 * 1024) throw IOException("内容响应过大")
-            val input = bodyStream.byteStream(); val out = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
-            while (out.size() <= 16 * 1024 * 1024) { RequestScope.ensureActive(); val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
-            if (out.size() > 16 * 1024 * 1024) throw IOException("内容响应过大")
-            String(out.toByteArray(), Charsets.UTF_8)
+    private fun fetch(url: String, headers: Map<String, String>, body: ByteArray?, route: PlaybackTrace.Route = PlaybackTrace.Route.FALLBACK): String {
+        PlaybackTrace.requestStart(route)
+        try {
+            val request = Request.Builder().url(url).header("Accept-Language", "zh-CN,zh;q=0.9")
+            headers.forEach { (k, v) -> request.header(k, v) }
+            body?.let { request.post(it.toRequestBody("application/json; charset=UTF-8".toMediaType())) }
+            PlaybackRequestBudget.current.get()?.request()
+            return RequestScope.execute((if(PlaybackRequestBudget.current.get()!=null) modelHttp else http).newCall(request.build())) { response ->
+                PlaybackTrace.response(response.code, response.body?.contentLength() ?: -1L)
+                if (response.code == 401 || response.code == 403) throw DeviceRejectedException("播放请求被拒绝（HTTP ${response.code}）")
+                if (!response.isSuccessful) throw PlaybackHttpException(response.code)
+                val bodyStream = response.body ?: throw IOException("内容响应为空")
+                if (bodyStream.contentLength() > 16 * 1024 * 1024) throw IOException("内容响应过大")
+                val input = bodyStream.byteStream(); val out = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
+                while (out.size() <= 16 * 1024 * 1024) { RequestScope.ensureActive(); val n = input.read(buffer); if (n < 0) break; out.write(buffer, 0, n) }
+                if (out.size() > 16 * 1024 * 1024) throw IOException("内容响应过大")
+                PlaybackTrace.requestEnd(out.size().toLong(), true)
+                String(out.toByteArray(), Charsets.UTF_8)
+            }
+        } catch (e: Exception) {
+            PlaybackTrace.requestFail(PlaybackTrace.failureOf(e))
+            throw e
         }
     }
-    private fun streamOnce(id: String, maxQuality: Int): StreamInfo {
+    private fun streamOnce(id: String, maxQuality: Int, retryBlank: Boolean = true): StreamInfo =
+        try {
+            streamOnceBody(id,maxQuality,retryBlank).also { PlaybackTrace.result(PlaybackTrace.Route.LEGACY, PlaybackTrace.Parser.SUCCESS, PlaybackTrace.Failure.NONE) }
+        } catch (e: Exception) {
+            PlaybackTrace.result(PlaybackTrace.Route.LEGACY, PlaybackTrace.parserOf(e), PlaybackTrace.failureOf(e))
+            throw e
+        }
+    private fun streamOnceBody(id: String, maxQuality: Int, retryBlank: Boolean): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
         val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
         val values=linkedMapOf(
@@ -540,18 +692,21 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
             "device_id" to VendorConstants.device.getValue("device_id"),"iid" to VendorConstants.device.getValue("iid")
         )
         val signed=signer.signSimple("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/preload/v1/",values,payload)
-        val resp=PlaybackReadRetry().read { text(signed.url,signed) }
-        if(resp.isBlank()) throw IOException("播放接口未返回有效数据，请稍后再试")
-        val data=JSONObject(resp)
-        if(data.optInt("Code",data.optInt("code",0))!=0) {
+        val resp=PlaybackReadRetry(route = PlaybackTrace.Route.LEGACY, retryBlank = retryBlank).read { text(signed.url,signed,PlaybackTrace.Route.LEGACY) }
+        if(resp.isBlank()) { PlaybackTrace.parser(PlaybackTrace.Route.LEGACY, PlaybackTrace.Parser.RAW_BLANK); throw IOException("播放接口未返回有效数据，请稍后再试") }
+        val data=try { JSONObject(resp) } catch (e: org.json.JSONException) { PlaybackTrace.parser(PlaybackTrace.Route.LEGACY, PlaybackTrace.Parser.MODEL_INVALID); throw e }
+        val code=data.optInt("Code",data.optInt("code",0))
+        PlaybackTrace.businessCode(PlaybackTrace.Route.LEGACY, code)
+        if(code!=0) {
             val message = data.str("Message").ifEmpty { data.str("message") }.ifEmpty { data.str("msg") }
             if (isIdentityRisk(200, message)) throw DeviceIdentityRejectedException("播放接口拒绝设备标识")
+            PlaybackTrace.failure(PlaybackTrace.Route.LEGACY, PlaybackTrace.Failure.HTTP)
             throw IOException("播放接口暂不可用")
         }
-        val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val entry=map.optJSONObject(id) ?: throw IOException("播放信息为空")
+        val map=data.optJSONObject("data") ?: run { PlaybackTrace.parser(PlaybackTrace.Route.LEGACY, PlaybackTrace.Parser.MODEL_INVALID); throw IOException("播放信息为空") }
+        val entry=map.optJSONObject(id) ?: run { PlaybackTrace.parser(PlaybackTrace.Route.LEGACY, PlaybackTrace.Parser.MODEL_INVALID); throw IOException("播放信息为空") }
         val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
-        val raw=model.opt("fallback_api") ?: throw EmptyPlaybackException(reason = EmptyPlaybackReason.NO_FALLBACK_API)
+        val raw=model.opt("fallback_api") ?: run { PlaybackTrace.parser(PlaybackTrace.Route.LEGACY, PlaybackTrace.Parser.NO_FALLBACK_API); throw EmptyPlaybackException(reason = EmptyPlaybackReason.NO_FALLBACK_API) }
         val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
         if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
         val info=fallbackInfo(fallback,VendorConstants.VIDEO_UA)
@@ -572,6 +727,8 @@ class ContentRepository(val http: OkHttpClient = HttpTransport.builder().connect
     companion object {
         @Volatile var deviceStore: PlayerDeviceStore? = null
         @Volatile var searchDeviceStore: PlayerDeviceStore? = null
+        /** Dedicated persisted namespace for the v5 mobile identity; null keeps legacy paths intact. */
+        @Volatile var mobileDeviceStore: PlayerDeviceStore? = null
         fun extractRouter(html: String): JSONObject {
             val marker=html.indexOf("_ROUTER_DATA"); if(marker<0) throw IOException("页面没有内容数据")
             val first=html.indexOf('{',marker); if(first<0) throw IOException("页面数据格式错误")
