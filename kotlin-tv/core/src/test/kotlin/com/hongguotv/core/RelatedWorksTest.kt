@@ -93,6 +93,33 @@ class RelatedWorksTest {
         assertEquals(listOf("2", "3", "4"), RelatedWorks.ordered(current, rows).map { it.series.id })
     }
 
+    @Test fun detailListsSeasonTaggedSubtitlesInNumericOrderBeforeOtherWorks() {
+        val current = Series("10", "海上来信第一季")
+        val rows = RelatedWorks.parse(raw(
+            row("20", "海上来信", tag = "同IP"),
+            row("21", "另一部剧", season = 1, tag = "第1季"),
+            row("12", "海上来信：远航", tag = "第十季"),
+            row("11", "海上来信·续", tag = "第2季"),
+            row("13", "海上来信第三季", season = 3),
+        ), current.id)
+
+        val ordered = RelatedWorks.ordered(current, rows)
+        assertEquals(listOf("11", "13", "12", "21", "20"), ordered.map { it.series.id })
+        assertNull(RelatedWorks.nextSeason(current, ordered))
+    }
+
+    @Test fun generatedSeasonLabelIsForDisplayAndDoesNotIdentifyASubtitledSequel() {
+        val current = Series("10", "海上来信")
+        val rows = RelatedWorks.parse(raw(
+            row("21", "海上来信·外传", season = 1),
+            row("22", "海上来信第二季", season = 2, tag = "同IP"),
+            row("12", "海上来信第十二季", season = 12),
+        ), current.id)
+
+        assertEquals("第1季", rows.single { it.series.id == "21" }.season)
+        assertEquals(listOf("12", "22", "21"), RelatedWorks.ordered(current, rows).map { it.series.id })
+    }
+
     @Test fun nextSeasonRequiresConsecutiveUniquePlayableMatchOfTheSameSeries() {
         val current = Series("1", "重返1998第十二季")
         fun next(vararg rows: RelatedWork) = RelatedWorks.nextSeason(current, rows.toList())

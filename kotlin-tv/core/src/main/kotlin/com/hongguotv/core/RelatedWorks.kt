@@ -11,6 +11,8 @@ data class RelatedWork(
     val upcoming: Boolean,
     val seasonIndex: Int = 0,
     val contentType: Int = 0,
+    /** Original relationship label. The card's season text can also be generated from season_index. */
+    val relationTag: String = season,
 ) {
     val label
         get() =
@@ -46,14 +48,30 @@ object RelatedWorks {
     private fun titleKey(title: String) = Normalizer.normalize(title, Normalizer.Form.NFKC)
         .replace(Regex("[\\p{P}\\p{Z}\\s]"), "")
 
-    fun ordered(current: Series, rows: List<RelatedWork>): List<RelatedWork> = rows.sortedWith(
-        compareBy<RelatedWork> { if (stem(it.series.title) == stem(current.title)) 0 else 1 }
-            .thenBy { stem(it.series.title) }
-            .thenBy { it.seasonIndex.takeIf { n -> n > 0 }
-                ?: it.series.seasonIndex.takeIf { n -> n > 0 }
-                ?: seasonSuffix.find(it.series.title.trim())?.groupValues?.get(1)?.let(::seasonNumber)
-                ?: 1 }
-    )
+    private val subtitleSeparator = Regex("[·:：]")
+    private fun mainTitle(title: String) = stem(title.split(subtitleSeparator, limit = 2).first())
+    private fun taggedSeason(row: RelatedWork) = seasonSuffix.matchEntire(row.relationTag.trim())
+        ?.groupValues?.get(1)?.let(::seasonNumber)
+
+    private fun displaySeason(row: RelatedWork): Int = row.seasonIndex.takeIf { it > 0 }
+        ?: row.series.seasonIndex.takeIf { it > 0 }
+        ?: taggedSeason(row)
+        ?: seasonSuffix.find(row.series.title.trim())?.groupValues?.get(1)?.let(::seasonNumber)
+        ?: 1
+
+    fun ordered(current: Series, rows: List<RelatedWork>): List<RelatedWork> {
+        val currentStem = stem(current.title)
+        val currentMainTitle = mainTitle(current.title)
+        val (seasons, others) = rows.partition { row ->
+            when {
+                row.relationTag.isBlank() -> currentStem.isNotEmpty() && stem(row.series.title) == currentStem
+                taggedSeason(row) != null -> currentMainTitle.isNotEmpty() && mainTitle(row.series.title) == currentMainTitle
+                else -> false
+            }
+        }
+        return seasons.sortedBy(::displaySeason) +
+            others.sortedWith(compareBy<RelatedWork> { stem(it.series.title) }.thenBy(::displaySeason))
+    }
 
     /**
      * Conservative: both titles must carry explicit adjacent season numbers (or trusted
@@ -129,10 +147,7 @@ object RelatedWorks {
                 val upcoming = type == 1007
                 if (!upcoming && (row.optBoolean("disable_play") || row.optInt("episode_cnt") <= 0))
                     return@mapNotNull null
-                val season =
-                    row.optJSONObject("tag_info")?.str("text").orEmpty().ifBlank {
-                        row.optInt("season_index").takeIf { it > 0 }?.let { "第${it}季" }.orEmpty()
-                    }
+                val relationTag = row.optJSONObject("tag_info")?.str("text").orEmpty()
                 val seasonIndex = row.optInt("season_index").coerceAtLeast(0)
                 RelatedWork(
                     Series(
@@ -143,10 +158,11 @@ object RelatedWorks {
                         if (upcoming) "待上线" else "全 ${row.optInt("episode_cnt")} 集",
                         seasonIndex = seasonIndex,
                     ),
-                    season,
+                    relationTag.ifBlank { seasonIndex.takeIf { it > 0 }?.let { "第${it}季" }.orEmpty() },
                     upcoming,
                     seasonIndex,
                     type,
+                    relationTag,
                 )
             }
             .distinctBy { it.series.id }
